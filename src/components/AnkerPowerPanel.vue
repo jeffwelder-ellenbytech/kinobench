@@ -1,8 +1,24 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useAnkerBattery } from '../composables/useAnkerBattery'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
+import { type TelemetryPortKey, useAnkerBattery } from '../composables/useAnkerBattery'
 
-const { connected, powerStatus, refreshStatus, startPolling, stopPolling, lastPolledAt } = useAnkerBattery()
+const AnkerTelemetryGraph = defineAsyncComponent(() => import('./AnkerTelemetryGraph.vue'))
+
+const {
+  connected,
+  cryptoState,
+  powerStatus,
+  refreshStatus,
+  startPolling,
+  stopPolling,
+  lastPolledAt,
+  telemetrySeries,
+  sessionChargeMetrics,
+  selectedTelemetryPort,
+  portActivity,
+  setSelectedTelemetryPort,
+  resetTelemetryHistory,
+} = useAnkerBattery()
 
 const autoRefresh = ref(false)
 const pollInterval = ref(2000)
@@ -32,6 +48,39 @@ const ports = [
   { key: 'usbC2' as const, label: 'USB-C 2', icon: 'mdi-usb-c-port' },
   { key: 'usbA' as const, label: 'USB-A', icon: 'mdi-usb-port' },
 ]
+
+const selectedGraphPort = computed<TelemetryPortKey>({
+  get: () => selectedTelemetryPort.value,
+  set: (value) => {
+    setSelectedTelemetryPort(value)
+  },
+})
+
+const telemetryPortItems = computed(() =>
+  ports.map((port) => ({
+    title: port.label,
+    value: port.key,
+    props: { disabled: !portActivity.value[port.key].isActive },
+  })),
+)
+
+const selectedPortInactive = computed(() => !portActivity.value[selectedTelemetryPort.value].isActive)
+const hasTelemetryData = computed(() => telemetrySeries.value.tsMs.length > 0)
+const graphReady = computed(() => connected.value && cryptoState.value === 'Session')
+const sessionMahLabel = computed(() => `${sessionChargeMetrics.value.accumulatedMah.toFixed(2)} mAh`)
+const sessionChargingTimeLabel = computed(() => {
+  const totalSeconds = Math.floor(sessionChargeMetrics.value.chargingMs / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+    .toString()
+    .padStart(2, '0')
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+    .toString()
+    .padStart(2, '0')
+  const seconds = Math.floor(totalSeconds % 60)
+    .toString()
+    .padStart(2, '0')
+  return `${hours}:${minutes}:${seconds}`
+})
 
 const lastPolledLabel = computed(() => {
   if (!lastPolledAt.value) return 'Never'
@@ -101,6 +150,9 @@ const lastPolledLabel = computed(() => {
               </v-chip>
             </v-card-title>
             <v-card-text class="pa-3 pt-1">
+              <div v-if="powerStatus[port.key].mode === 'Off'" class="text-caption text-disabled mb-1">
+                Inactive
+              </div>
               <div class="d-flex justify-space-between text-body-2">
                 <span>{{ powerStatus[port.key].voltage }} V</span>
                 <span>{{ powerStatus[port.key].current }} A</span>
@@ -110,6 +162,75 @@ const lastPolledLabel = computed(() => {
           </v-card>
         </v-col>
       </v-row>
+
+      <v-divider class="my-4" />
+
+      <div class="d-flex align-center flex-wrap ga-2 mb-3" :class="{ 'opacity-40': selectedPortInactive }">
+        <div class="text-subtitle-2">Scientific Telemetry</div>
+        <v-spacer />
+        <v-select
+          v-model="selectedGraphPort"
+          :items="telemetryPortItems"
+          item-title="title"
+          item-value="value"
+          item-props="props"
+          label="Port"
+          density="compact"
+          hide-details
+          variant="outlined"
+          class="telemetry-port-select"
+          :disabled="!connected"
+        />
+        <v-btn size="small" variant="tonal" :disabled="!connected" @click="resetTelemetryHistory">
+          Reset History
+        </v-btn>
+      </div>
+
+      <div
+        class="d-flex align-center flex-wrap ga-4 mb-3 text-caption text-disabled"
+        :class="{ 'opacity-40': selectedPortInactive }"
+      >
+        <div>Session charge: <strong class="text-medium-emphasis">{{ sessionMahLabel }}</strong></div>
+        <div>Charging time: <strong class="text-medium-emphasis">{{ sessionChargingTimeLabel }}</strong></div>
+      </div>
+
+      <div class="position-relative">
+        <AnkerTelemetryGraph
+          v-if="graphReady"
+          :series="telemetrySeries"
+          :inactive="selectedPortInactive"
+        />
+        <div v-else class="telemetry-placeholder d-flex align-center justify-center text-caption">
+          Graph loads after BLE session key is established.
+        </div>
+        <div
+          v-if="graphReady && (!hasTelemetryData || selectedPortInactive)"
+          class="telemetry-overlay d-flex align-center justify-center text-caption"
+        >
+          {{ !hasTelemetryData ? 'No telemetry yet. Poll or wait for live updates.' : 'Selected port is inactive.' }}
+        </div>
+      </div>
     </v-card-text>
   </v-card>
 </template>
+
+<style scoped>
+.telemetry-port-select {
+  max-width: 180px;
+}
+
+.telemetry-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-surface), 0.75);
+  pointer-events: none;
+}
+
+.telemetry-placeholder {
+  min-height: 360px;
+  border: 1px dashed rgba(var(--v-theme-on-surface), 0.25);
+  border-radius: 8px;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+}
+</style>
