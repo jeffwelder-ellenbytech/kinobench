@@ -9,6 +9,7 @@ const {
   cryptoState,
   powerStatus,
   refreshStatus,
+  setPortOutput,
   disconnect,
   startPolling,
   stopPolling,
@@ -90,6 +91,20 @@ const lastPolledLabel = computed(() => {
 const activePortCount = computed(
   () => ports.filter((port) => portActivity.value[port.key].mode === 'Output').length,
 )
+
+const togglingPort = ref<TelemetryPortKey | null>(null)
+
+async function togglePort(port: TelemetryPortKey) {
+  const isOutput = powerStatus.value[port].mode === 'Output'
+  togglingPort.value = port
+  try {
+    await setPortOutput(port, !isOutput)
+  } catch {
+    // Error is already propagated into the store's `error` ref.
+  } finally {
+    togglingPort.value = null
+  }
+}
 </script>
 
 <template>
@@ -162,6 +177,17 @@ const activePortCount = computed(
                 <span>{{ powerStatus[port.key].current }} A</span>
                 <span class="font-weight-medium">{{ powerStatus[port.key].power }} W</span>
               </div>
+              <v-btn
+                block
+                size="small"
+                class="mt-3"
+                :color="powerStatus[port.key].mode === 'Output' ? 'error' : 'success'"
+                :loading="togglingPort === port.key"
+                :disabled="!connected || cryptoState !== 'Session' || togglingPort !== null"
+                @click="togglePort(port.key)"
+              >
+                {{ powerStatus[port.key].mode === 'Output' ? 'Turn Off' : 'Turn On' }}
+              </v-btn>
             </v-card-text>
           </v-card>
         </v-col>

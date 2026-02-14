@@ -86,6 +86,7 @@ const CMD_STATUS_LIVE = 0x050e
 const CMD_CHARGER_STATUS_FULL = 0x0200
 const CMD_CHARGER_STATUS_LIVE = 0x0300
 const CMD_CHARGER_STATUS_AUX = 0x020a
+const CMD_CHARGER_PORT_SWITCH = 0x0207
 const SOLIX_NEGOTIATION_TIMEOUT_MS = 90_000
 const SOLIX_NEGOTIATION_RETRY_MS = 3_000
 const SOLIX_PRIVATE_KEY_HEX = '7dfbea61cd95cee49c458ad7419e817f1ade9a66136de3c7d5787af1458e39f4'
@@ -108,6 +109,24 @@ function toHexString(data: Uint8Array): string {
   return Array.from(data)
     .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
     .join(' ')
+}
+
+function toHexStringLimited(data: Uint8Array, maxBytes: number): string {
+  if (maxBytes <= 0) return ''
+  if (data.byteLength <= maxBytes) return toHexString(data)
+
+  // Show a stable preview: head + tail, with a middle elision.
+  const tailBytes = Math.min(16, Math.max(0, maxBytes - 8))
+  const headBytes = Math.max(0, maxBytes - tailBytes)
+  const head = data.slice(0, headBytes)
+  const tail = tailBytes > 0 ? data.slice(data.byteLength - tailBytes) : new Uint8Array()
+  const omitted = Math.max(0, data.byteLength - head.byteLength - tail.byteLength)
+
+  const headHex = head.byteLength ? toHexString(head) : ''
+  const tailHex = tail.byteLength ? toHexString(tail) : ''
+  if (!tailHex) return `${headHex} ... (+${omitted} bytes)`
+  if (!headHex) return `... (+${omitted} bytes) ${tailHex}`
+  return `${headHex} ... (+${omitted} bytes) ... ${tailHex}`
 }
 
 function xorChecksum(data: Uint8Array): number {
@@ -227,13 +246,23 @@ function parsePortData(value: Uint8Array): AnkerPortData {
 
 function parseA2687PortData(value: Uint8Array): AnkerPortData {
   // Observed A2687 layout:
-  // [0]=0x04 layout marker, [1]=mode, [2..3]=mV, [4..5]=mA, [6..7]=deci-watts
+  // [0]=0x04 layout marker
+  // [1]=port enabled flag (observed: 0=off, 1=on)
+  // [2..3]=millivolts (LE)
+  // [4..5]=milliamps? (LE) (empirically: raw/1000 == amps)
+  // [6..7]=unknown/unused (often present; may be power or checksum-like)
   if (value.length < 8) return { mode: 'Off', voltage: 0, current: 0, power: 0 }
-  const mode = getModeString(value[1] ?? 0)
+  const enabledFlag = value[1] ?? 0
+  const mode: 'Off' | 'Output' = enabledFlag === 0 ? 'Off' : 'Output'
   const millivolts = parseU16LE(value, 2)
   const currentRaw = parseU16LE(value, 4)
+  if (mode === 'Off') {
+    // If the port is disabled, treat telemetry as not-present to avoid false positives
+    // when no load is connected (some firmwares still report an "Output" voltage).
+    return { mode: 'Off', voltage: 0, current: 0, power: 0 }
+  }
+
   const voltage = Math.round((millivolts / 1000) * 1000) / 1000
-  // Empirical calibration: multiply prior current estimate by 10.
   const current = Math.round((currentRaw / 1000) * 1000) / 1000
   const computedPower = Math.round(voltage * current * 10) / 10
   return {
@@ -364,19 +393,105 @@ export class AnkerBleService {
   private solixLastInitiationAt = 0
   private solixNegotiationPacketCount = 0
   private solixSharedKey: CryptoKey | null = null
+  // Controls noisy per-packet logs; default is intentionally quiet.
+  private trafficLogging: 'none' | 'summary' | 'hex' = 'none'
+  // Controls high-level status spam.
+  private statusLogging: 'none' | 'changes' | 'all' = 'changes'
+  // Caps giant hex dumps in logs.
+  private maxHexBytes = 96
+  private logLevel: 'none' | 'info' | 'debug' = 'info'
+  private lastStatusLogKey: string | null = null
+  private lastStatusLogAt = 0
   // Matches reference: resolveNextNotificationPromise pattern
   private resolveNextNotification: ((data: Uint8Array) => void) | null = null
   private callbacks: AnkerBleCallbacks
   private profile: AnkerBleProfile
 
-  constructor(callbacks: AnkerBleCallbacks = {}, profile: AnkerBleProfile = ANKER_POWERBANK_PROFILE) {
+  constructor(
+    callbacks: AnkerBleCallbacks = {},
+    profile: AnkerBleProfile = ANKER_POWERBANK_PROFILE,
+    options: {
+      trafficLogging?: 'none' | 'summary' | 'hex'
+      statusLogging?: 'none' | 'changes' | 'all'
+      maxHexBytes?: number
+      logLevel?: 'none' | 'info' | 'debug'
+    } = {},
+  ) {
     this.callbacks = callbacks
     this.profile = profile
+    this.trafficLogging = options.trafficLogging ?? 'none'
+    this.statusLogging = options.statusLogging ?? 'changes'
+    this.maxHexBytes = options.maxHexBytes ?? 96
+    this.logLevel = options.logLevel ?? 'info'
+  }
+
+  private formatHex(data: Uint8Array): string {
+    return toHexStringLimited(data, this.maxHexBytes)
+  }
+
+  private info(msg: string): void {
+    if (this.logLevel === 'none') return
+    console.log(`[AnkerBLE] ${msg}`)
+    this.callbacks.onLog?.(msg)
+  }
+
+  private debug(msg: string): void {
+    if (this.logLevel !== 'debug') return
+    console.log(`[AnkerBLE] ${msg}`)
+    this.callbacks.onLog?.(msg)
   }
 
   private log(msg: string): void {
-    console.log(`[AnkerBLE] ${msg}`)
-    this.callbacks.onLog?.(msg)
+    this.info(msg)
+  }
+
+  private logTraffic(summary: string, hex?: string): void {
+    if (this.trafficLogging === 'none') return
+    if (this.trafficLogging === 'hex') {
+      this.debug(hex ?? summary)
+      return
+    }
+    this.debug(summary)
+  }
+
+  private logStatus(prefix: string, status: AnkerPowerStatus): void {
+    if (this.statusLogging === 'none') return
+
+    const key = [
+      prefix,
+      `b=${status.batteryPercent}`,
+      `t=${status.temperature}`,
+      `out=${status.totalOutputW}`,
+      `C1=${status.usbC1.mode}:${status.usbC1.power}`,
+      `C2=${status.usbC2.mode}:${status.usbC2.power}`,
+      `C3=${status.usbA.mode}:${status.usbA.power}`,
+    ].join('|')
+
+    const now = Date.now()
+    if (this.statusLogging === 'changes') {
+      // Avoid spamming identical telemetry; still allow periodic refresh.
+      if (key === this.lastStatusLogKey && now - this.lastStatusLogAt < 3_000) return
+    }
+
+    this.lastStatusLogKey = key
+    this.lastStatusLogAt = now
+
+    this.info(
+      `    ${prefix}: out=${status.totalOutputW}W C1=${status.usbC1.power}W C2=${status.usbC2.power}W C3=${status.usbA.power}W`,
+    )
+  }
+
+  private static summarizeCommandPayload(payload: Uint8Array): string {
+    // Payload is typically: [0x03,0x00, group, cmdHigh, cmdLow, ...]
+    if (payload.byteLength < 5) return `len=${payload.byteLength}`
+    const group = payload[2] ?? 0
+    const cmdHigh = payload[3] ?? 0
+    const cmdLow = payload[4] ?? 0
+    const encrypted = (cmdHigh & COMMAND_FLAG_ENCRYPTED) !== 0
+    const ack = (cmdHigh & COMMAND_FLAG_ACK) !== 0
+    const cmdHighBase = cmdHigh & ~(COMMAND_FLAG_ENCRYPTED | COMMAND_FLAG_ACK)
+    const cmd = (cmdHighBase << 8) | cmdLow
+    return `group=0x${group.toString(16).padStart(2, '0')} cmd=0x${cmd.toString(16).padStart(4, '0')} enc=${encrypted} ack=${ack} len=${payload.byteLength}`
   }
 
   get isConnected(): boolean {
@@ -485,7 +600,10 @@ export class AnkerBleService {
   private async sendPayload(payload: Uint8Array): Promise<void> {
     if (!this.writeChar) throw new Error('Not connected')
     const packet = framePacket(payload)
-    this.log(`--> SEND (${packet.byteLength} bytes) ${toHexString(packet)}`)
+    this.logTraffic(
+      `--> SEND ${AnkerBleService.summarizeCommandPayload(payload)}`,
+      `--> SEND (${packet.byteLength} bytes) ${this.formatHex(packet)}`,
+    )
     // Pass Uint8Array directly, matching reference implementation
     await this.writeChar.writeValueWithoutResponse(packet)
   }
@@ -512,7 +630,7 @@ export class AnkerBleService {
   }
 
   private handleNotification(rawData: Uint8Array): void {
-    this.log(`<-- RECV (${rawData.byteLength} bytes) ${toHexString(rawData)}`)
+    this.logTraffic(`<-- RECV len=${rawData.byteLength}`, `<-- RECV (${rawData.byteLength} bytes) ${this.formatHex(rawData)}`)
 
     if (this.profile.name === 'Charger') {
       if (this.tryHandleChargerSolixNotification(rawData)) return
@@ -543,13 +661,14 @@ export class AnkerBleService {
       this.lastReceivedCommand = fullCommand
       this.lastReceivedWasEncrypted = isEncrypted
 
-      this.log(
+      this.logTraffic(
+        `    Command: 0x${fullCommand.toString(16).padStart(4, '0')} enc=${isEncrypted} ack=${isAck}`,
         `    Command: 0x${fullCommand.toString(16).padStart(4, '0')} encrypted=${isEncrypted} ack=${isAck}`,
       )
 
       if (isEncrypted) {
         if (!this.activeKey) {
-          this.log('    No active key for decryption')
+          this.logTraffic('    No active key for decryption')
         } else {
           // Some charger responses include a status byte before ciphertext.
           const candidates: Uint8Array[] = [payloadWithHeader.slice(5)]
@@ -573,7 +692,7 @@ export class AnkerBleService {
           tryDecrypt()
             .then((decrypted) => {
               this.decryptSuccessCount++
-              this.log(`    Decrypted: ${toHexString(decrypted)}`)
+              this.logTraffic(`    Decrypted len=${decrypted.byteLength}`, `    Decrypted: ${this.formatHex(decrypted)}`)
 
               // Process decrypted content
               this.processDecryptedContent(fullCommand, decrypted)
@@ -587,7 +706,7 @@ export class AnkerBleService {
             })
             .catch((err) => {
               this.decryptErrorCount++
-              this.log(`    Decryption error: ${err}`)
+              this.logTraffic(`    Decryption error: ${String(err)}`)
               // Still resolve promise on error (reference does this)
               if (this.resolveNextNotification) {
                 const resolve = this.resolveNextNotification
@@ -623,7 +742,7 @@ export class AnkerBleService {
       rawData[3] === 0x6c &&
       rawData[4] === 0x6f
     ) {
-      this.log('    Ignoring charger heartbeat payload "hello"')
+      this.logTraffic('    Ignoring charger heartbeat payload "hello"')
       return true
     }
 
@@ -715,6 +834,12 @@ export class AnkerBleService {
         return
       }
       this.parseA2687Status(tlv, normalizedCommand)
+    } else if (normalizedCommand === CMD_CHARGER_PORT_SWITCH) {
+      this.log(
+        `    Charger port-switch response TLV: ${Array.from(tlv.entries())
+          .map(([type, value]) => `0x${type.toString(16).toUpperCase()}=${toHexString(value)}`)
+          .join(' ')}`,
+      )
     }
   }
 
@@ -742,10 +867,6 @@ export class AnkerBleService {
     if (tlv.has(0xa7)) status.usbA = parseA2687PortData(tlv.get(0xa7)!)
 
     const ports = [status.usbC1, status.usbC2, status.usbA]
-    for (const port of ports) {
-      const hasPower = port.power > 0 || port.current > 0 || port.voltage > 0
-      port.mode = hasPower ? 'Output' : 'Off'
-    }
     const computedOutW = Math.round(ports.reduce((sum, p) => sum + Math.max(0, p.power), 0) * 10) / 10
 
     // Charger is AC->DC output device; keep totals output-centric.
@@ -762,9 +883,7 @@ export class AnkerBleService {
     this.lastPowerStatus = status
     this.chargerStatusSource = 'FF09'
     this.chargerTelemetrySeenAt = Date.now()
-    this.log(
-      `    A2687 Status(0x${command.toString(16).padStart(4, '0')}): out=${status.totalOutputW}W in=${status.totalInputW}W C1=${status.usbC1.power}W C2=${status.usbC2.power}W C3=${status.usbA.power}W`,
-    )
+    this.logStatus(`A2687(0x${command.toString(16).padStart(4, '0')})`, status)
     this.callbacks.onPowerStatus?.(status)
   }
 
@@ -798,7 +917,7 @@ export class AnkerBleService {
       this.chargerStatusSource = 'FF09'
       this.chargerTelemetrySeenAt = Date.now()
     }
-    this.log(`    Status: ${status.batteryPercent}% ${status.temperature}°C out=${status.totalOutputW}W in=${status.totalInputW}W`)
+    this.logStatus('Status', status)
     this.callbacks.onPowerStatus?.(status)
   }
 
@@ -828,9 +947,7 @@ export class AnkerBleService {
       this.chargerStatusSource = 'FF09'
       this.chargerTelemetrySeenAt = Date.now()
     }
-    this.log(
-      `    Live Status: ${status.batteryPercent}% ${status.temperature}°C out=${status.totalOutputW}W in=${status.totalInputW}W`,
-    )
+    this.logStatus('Live', status)
     this.callbacks.onPowerStatus?.(status)
   }
 
@@ -896,9 +1013,7 @@ export class AnkerBleService {
     this.lastPowerStatus = status
     this.chargerStatusSource = 'SolixEncrypted'
     this.chargerTelemetrySeenAt = Date.now()
-    this.log(
-      `    Charger Telemetry(${layout}, decrypted ${rawData.byteLength}B): out=${status.totalOutputW}W in=${status.totalInputW}W`,
-    )
+    this.logStatus(`Charger Telemetry(${layout})`, status)
     this.callbacks.onPowerStatus?.(status)
     return true
   }
@@ -906,7 +1021,7 @@ export class AnkerBleService {
   private async tryParseEncryptedSolixTelemetry(rawData: Uint8Array): Promise<void> {
     const decrypted = await this.decryptSolixTelemetryPacket(rawData)
     if (!decrypted) return
-    this.log(`    Decrypted charger telemetry (${decrypted.byteLength}B)`)
+    this.logTraffic(`    Decrypted charger telemetry len=${decrypted.byteLength}B`)
     if (!this.parseSolixTelemetry(decrypted)) {
       this.log(`    Decrypted charger payload not recognized (${decrypted.byteLength}B)`)
     }
@@ -915,7 +1030,7 @@ export class AnkerBleService {
   private async sendRawCommandPacket(hex: string): Promise<void> {
     if (!this.writeChar) return
     const packet = hexToBytes(hex)
-    this.log(`--> SEND RAW (${packet.byteLength} bytes) ${toHexString(packet)}`)
+    this.logTraffic(`--> SEND RAW len=${packet.byteLength}`, `--> SEND RAW (${packet.byteLength} bytes) ${this.formatHex(packet)}`)
     if (this.writeChar.properties.write) {
       try {
         await this.writeChar.writeValueWithResponse(packet)
@@ -1084,7 +1199,7 @@ export class AnkerBleService {
     try {
       const value = await this.notifyChar.readValue()
       const data = new Uint8Array(value.buffer as ArrayBuffer)
-      this.log(`<-- READ (${data.byteLength} bytes) ${toHexString(data)}`)
+      this.logTraffic(`<-- READ len=${data.byteLength}`, `<-- READ (${data.byteLength} bytes) ${this.formatHex(data)}`)
       this.handleNotification(data)
     } catch (err) {
       this.log(`Charger telemetry read failed: ${String(err)}`)
@@ -1097,7 +1212,7 @@ export class AnkerBleService {
     const probeTlv = [{ type: 0xa1, value: new Uint8Array([0x21]) }]
     for (const command of this.profile.statusCommands) {
       const payload = buildRequestContent(command, probeTlv, GROUP_STATUS)
-      this.log(`Sending charger status probe 0x${command.toString(16).padStart(4, '0')}`)
+      this.logTraffic(`Sending charger status probe 0x${command.toString(16).padStart(4, '0')}`)
       await this.sendPayload(payload)
     }
   }
@@ -1159,8 +1274,14 @@ export class AnkerBleService {
     // Setup initial encryption
     const initialKey = hexToBytes(A2_STATIC_HEX.substring(0, 32))
     const iv = normalizeIvFromSerial(this.serialNumber)
-    this.log(`Initial key (${initialKey.length} bytes): ${toHexString(initialKey)}`)
-    this.log(`IV from serial "${this.serialNumber}" normalized to ${iv.length} bytes: ${toHexString(iv)}`)
+    this.logTraffic(
+      `Initial key len=${initialKey.length}B`,
+      `Initial key (${initialKey.length} bytes): ${toHexString(initialKey)}`,
+    )
+    this.logTraffic(
+      `IV derived from serial len=${iv.length}B`,
+      `IV from serial "${this.serialNumber}" normalized to ${iv.length} bytes: ${toHexString(iv)}`,
+    )
     await this.setupCrypto(initialKey, iv, 'Initial')
 
     const sessionKeyTlvs = [
@@ -1290,5 +1411,108 @@ export class AnkerBleService {
       // Keep plain probes as a fallback trigger for charger variants.
       await this.sendChargerStatusProbe()
     }
+  }
+
+  async setChargerPortSwitch(port: 'usbC1' | 'usbC2' | 'usbA', enabled: boolean): Promise<void> {
+    if (this.profile.name !== 'Charger') {
+      throw new Error('Port switch is only supported for charger profile')
+    }
+    if (this.cryptoState !== 'Session') {
+      throw new Error(`Session key is not active. Current crypto state: ${this.cryptoState}`)
+    }
+
+    // APK surface shows action_set_dc_port_switch + switchIndex/switchOn.
+    //
+    // A2687 telemetry mapping in this codebase is:
+    // A5 -> C1, A6 -> C2, A7 -> C3 (represented as usbA in the UI).
+    //
+    // Empirical port-switch indices observed during debugging:
+    // - index=3 val=0: reported success (C1/C2 unclear at the time)
+    // - index=2 val=0: reported success
+    // We'll try the tight mapping first, then fall back to older guesses + brute force.
+    const tightIndexByPort: Record<'usbC1' | 'usbC2' | 'usbA', number> = {
+      usbC1: 3,
+      usbC2: 2,
+      usbA: 1,
+    }
+
+    // We know 0x0207 responds with TLVs: A1=0x31, A2=index, A3=value.
+    // The response simply echoes our requested index/value, so we need to empirically
+    // determine which index and which value actually flips the port state on-device.
+    const desiredEnabled = enabled
+    const before = this.lastPowerStatus[port]
+    this.info(
+      `Sending charger port switch request: cmd=0x${CMD_CHARGER_PORT_SWITCH.toString(16)} port=${port} before=${before.mode}/${before.voltage}V/${before.current}A/${before.power}W`,
+    )
+
+    // From captures: command 0x0207 responds with TLVs like:
+    //   A1=0x31, A2=<switchIndex>, A3=<switchOn>
+    // So the TLV *shape* is known. Remaining ambiguity is which numeric index
+    // corresponds to which physical port.
+    const legacyIndexByPort: Record<'usbC1' | 'usbC2' | 'usbA', number> = {
+      // Older guesses used earlier in this repo.
+      usbC1: 5,
+      usbC2: 6,
+      usbA: 7,
+    }
+
+    const candidateIndices = Array.from(
+      new Set<number>([tightIndexByPort[port], legacyIndexByPort[port], 0, 1, 2, 3, 4, 5, 6, 7]),
+    )
+
+    // Values are still ambiguous in the wild. Based on "val=0 worked" report,
+    // try 0 as OFF first and 1 as ON first, with 2 as fallback.
+    const candidateValues = desiredEnabled ? [1, 2] : [0, 1, 2]
+
+    const isPortOff = (pd: AnkerPortData): boolean => pd.mode === 'Off'
+    const isPortOn = (pd: AnkerPortData): boolean => pd.mode === 'Output'
+
+    for (const idx of candidateIndices) {
+      for (const val of candidateValues) {
+        this.logTraffic(
+          `Port switch attempt: A1=0x31 A2=index(${idx}) A3=val(${val}) target=${desiredEnabled ? 'ON' : 'OFF'}`,
+        )
+
+        try {
+          const response = await this.sendEncryptedAndWait(GROUP_STATUS, CMD_CHARGER_PORT_SWITCH, [
+            { type: 0xa1, value: new Uint8Array([0x31]) },
+            { type: 0xa2, value: new Uint8Array([idx]) },
+            { type: 0xa3, value: new Uint8Array([val]) },
+          ])
+          this.logTraffic(
+            `Port switch response len=${response.byteLength}`,
+            `Port switch response payload (${response.byteLength} bytes): ${this.formatHex(response)}`,
+          )
+        } catch (err) {
+          this.info(`Port switch send/wait error (index=${idx} val=${val}): ${String(err)}`)
+        }
+
+        // Give the device time to apply, then poll twice.
+        await new Promise((resolve) => setTimeout(resolve, 800))
+        await this.requestStatus()
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        await this.requestStatus()
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        const now = this.lastPowerStatus[port]
+        const success = desiredEnabled ? isPortOn(now) : isPortOff(now)
+        this.logTraffic(
+          `Port switch post-check (port=${port} index=${idx} val=${val}): now=${now.mode}/${now.voltage}V/${now.current}A/${now.power}W success=${success}`,
+        )
+        if (success) {
+          this.info(`Port switch success: port=${port} index=${idx} val=${val} now=${now.mode}/${now.power}W`)
+          return
+        }
+
+        // Rate limit.
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
+    }
+
+    throw new Error(
+      `Port switch command sent but state did not change for ${port} (tried indices: ${candidateIndices.join(
+        ',',
+      )})`,
+    )
   }
 }

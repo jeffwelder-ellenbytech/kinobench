@@ -194,6 +194,16 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
   }
 
   function createService(): AnkerBleService {
+    const trafficLogging = (() => {
+      try {
+        const raw = localStorage.getItem('ankerBleTrafficLogging')
+        if (raw === 'hex' || raw === 'summary' || raw === 'none') return raw
+      } catch {
+        // Ignore storage access issues (private mode, disabled storage, etc.)
+      }
+      return 'none' as const
+    })()
+
     return new AnkerBleService(
       {
         onConnectionChange(isConnected) {
@@ -219,7 +229,17 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
         },
       },
       profile,
+      { trafficLogging },
     )
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
   }
 
   const telemetrySeries = computed(() => buildTelemetrySeries(selectedTelemetryPort.value))
@@ -229,7 +249,9 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
     if (connected.value) return true
     if (!('bluetooth' in navigator) || typeof navigator.bluetooth.getDevices !== 'function') return false
 
-    const knownDevices = await navigator.bluetooth.getDevices()
+    // Some browsers/OS combos can hang here if the BLE stack is in a weird state.
+    // Don't block the user from doing a normal `requestDevice()` connect.
+    const knownDevices = await withTimeout(navigator.bluetooth.getDevices(), 3000, 'navigator.bluetooth.getDevices')
     if (!knownDevices.length) return false
 
     for (const knownDevice of knownDevices) {
@@ -247,7 +269,7 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
 
       try {
         service = createService()
-        await service.connectToDevice(knownDevice)
+        await withTimeout(service.connectToDevice(knownDevice), 12_000, `connectToDevice(${knownDevice.name ?? 'unknown'})`)
         selectFirstActivePort()
         return true
       } catch {
@@ -268,7 +290,13 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
     error.value = null
     loading.value = true
     try {
-      const resumed = await tryResumeKnownConnection()
+      let resumed = false
+      try {
+        resumed = await tryResumeKnownConnection()
+      } catch {
+        // If resume fails/hangs, fall back to normal requestDevice flow.
+        resumed = false
+      }
       if (resumed) return
 
       service = createService()
@@ -295,6 +323,18 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
       lastPolledAt.value = new Date()
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  async function setPortOutput(port: TelemetryPortKey, enabled: boolean) {
+    if (!service || profile.name !== 'Charger') return
+    error.value = null
+    try {
+      await service.setChargerPortSwitch(port, enabled)
+      lastPolledAt.value = new Date()
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      throw err
     }
   }
 
@@ -341,6 +381,7 @@ export function createAnkerDeviceStore(profile: AnkerBleProfile) {
       connect,
       disconnect,
       refreshStatus,
+      setPortOutput,
       startPolling,
       stopPolling,
       setSelectedTelemetryPort,
