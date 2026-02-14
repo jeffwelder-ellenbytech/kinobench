@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
-import { type TelemetryPortKey, useAnkerBattery } from '../composables/useAnkerBattery'
+import { type TelemetryPortKey, useAnkerCharger } from '../composables/useAnkerCharger'
 
 const AnkerTelemetryGraph = defineAsyncComponent(() => import('./AnkerTelemetryGraph.vue'))
 
@@ -19,7 +19,7 @@ const {
   portActivity,
   setSelectedTelemetryPort,
   resetTelemetryHistory,
-} = useAnkerBattery()
+} = useAnkerCharger()
 
 const autoRefresh = ref(false)
 const pollInterval = ref(2000)
@@ -40,14 +40,13 @@ watch(connected, (isConnected) => {
 
 function modeColor(mode: string): string {
   if (mode === 'Output') return 'success'
-  if (mode === 'Input') return 'info'
   return 'default'
 }
 
 const ports = [
   { key: 'usbC1' as const, label: 'USB-C 1', icon: 'mdi-usb-c-port' },
   { key: 'usbC2' as const, label: 'USB-C 2', icon: 'mdi-usb-c-port' },
-  { key: 'usbA' as const, label: 'USB-A', icon: 'mdi-usb-port' },
+  { key: 'usbA' as const, label: 'USB-C 3', icon: 'mdi-usb-c-port' },
 ]
 
 const selectedGraphPort = computed<TelemetryPortKey>({
@@ -87,13 +86,17 @@ const lastPolledLabel = computed(() => {
   if (!lastPolledAt.value) return 'Never'
   return lastPolledAt.value.toLocaleTimeString()
 })
+
+const activePortCount = computed(
+  () => ports.filter((port) => portActivity.value[port.key].mode === 'Output').length,
+)
 </script>
 
 <template>
   <v-card :disabled="!connected">
     <v-card-title class="d-flex align-center">
       <v-icon class="mr-2">mdi-lightning-bolt</v-icon>
-      Power Monitor
+      Charger Monitor
       <v-spacer />
       <v-switch
         v-model="autoRefresh"
@@ -124,19 +127,14 @@ const lastPolledLabel = computed(() => {
     <v-card-text>
       <div class="text-caption text-disabled mb-2">Last polled: {{ lastPolledLabel }}</div>
 
-      <!-- Battery & Summary -->
       <v-row class="mb-2">
-        <v-col cols="4" class="text-center">
-          <div class="text-h3 font-weight-bold">{{ powerStatus.batteryPercent }}%</div>
-          <div class="text-caption text-disabled">Battery</div>
-        </v-col>
-        <v-col cols="4" class="text-center">
+        <v-col cols="6" class="text-center">
           <div class="text-h5">{{ powerStatus.totalOutputW }} W</div>
           <div class="text-caption text-disabled">Output</div>
         </v-col>
-        <v-col cols="4" class="text-center">
-          <div class="text-h5">{{ powerStatus.totalInputW }} W</div>
-          <div class="text-caption text-disabled">Input</div>
+        <v-col cols="6" class="text-center">
+          <div class="text-h5">{{ activePortCount }}/3</div>
+          <div class="text-caption text-disabled">Active Ports</div>
         </v-col>
       </v-row>
 
@@ -144,13 +142,9 @@ const lastPolledLabel = computed(() => {
         Temperature: {{ powerStatus.temperature }} °C
       </div>
 
-      <!-- Per-port cards -->
       <v-row>
         <v-col v-for="port in ports" :key="port.key" cols="12" sm="4">
-          <v-card
-            variant="outlined"
-            :class="{ 'opacity-40': powerStatus[port.key].mode === 'Off' }"
-          >
+          <v-card variant="outlined" :class="{ 'opacity-40': powerStatus[port.key].mode === 'Off' }">
             <v-card-title class="text-subtitle-2 d-flex align-center pa-3 pb-1">
               <v-icon size="small" class="mr-1">{{ port.icon }}</v-icon>
               {{ port.label }}
@@ -205,11 +199,7 @@ const lastPolledLabel = computed(() => {
       </div>
 
       <div class="position-relative">
-        <AnkerTelemetryGraph
-          v-if="graphReady"
-          :series="telemetrySeries"
-          :inactive="selectedPortInactive"
-        />
+        <AnkerTelemetryGraph v-if="graphReady" :series="telemetrySeries" :inactive="selectedPortInactive" />
         <div v-else class="telemetry-placeholder d-flex align-center justify-center text-caption">
           Graph loads after BLE session key is established.
         </div>

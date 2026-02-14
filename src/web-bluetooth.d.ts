@@ -73,6 +73,7 @@ interface BluetoothRemoteGATTServer {
 interface BluetoothDevice extends EventTarget {
   readonly id: string
   readonly name?: string
+  readonly uuids?: string[]
   readonly gatt?: BluetoothRemoteGATTServer
   ongattserverdisconnected: ((this: BluetoothDevice, ev: Event) => void) | null
   addEventListener(type: 'gattserverdisconnected', listener: (this: BluetoothDevice, ev: Event) => void, options?: boolean | AddEventListenerOptions): void
@@ -81,6 +82,7 @@ interface BluetoothDevice extends EventTarget {
 
 interface Bluetooth extends EventTarget {
   getAvailability(): Promise<boolean>
+  getDevices(): Promise<BluetoothDevice[]>
   requestDevice(options?: RequestDeviceOptions): Promise<BluetoothDevice>
 }
 

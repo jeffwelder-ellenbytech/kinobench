@@ -6,8 +6,10 @@ import LEDPanel from './components/LEDPanel.vue'
 import DebugPanel from './components/DebugPanel.vue'
 import AnkerConnectionPanel from './components/AnkerConnectionPanel.vue'
 import AnkerPowerPanel from './components/AnkerPowerPanel.vue'
+import AnkerChargerConnectionPanel from './components/AnkerChargerConnectionPanel.vue'
+import AnkerChargerPowerPanel from './components/AnkerChargerPowerPanel.vue'
 
-const activeTab = ref('anker')
+const activeTab = ref('anker-charger')
 </script>
 
 <template>
@@ -23,7 +25,8 @@ const activeTab = ref('anker')
       <v-container fluid class="pa-4">
         <v-tabs v-model="activeTab" class="mb-4">
           <v-tab value="buspirate" prepend-icon="mdi-usb">Bus Pirate</v-tab>
-          <v-tab value="anker" prepend-icon="mdi-bluetooth">Anker Battery</v-tab>
+          <v-tab value="anker" prepend-icon="mdi-battery">Anker Powerbank</v-tab>
+          <v-tab value="anker-charger" prepend-icon="mdi-flash">Anker Charger</v-tab>
         </v-tabs>
 
         <v-tabs-window v-model="activeTab">
@@ -47,6 +50,17 @@ const activeTab = ref('anker')
               </v-col>
               <v-col cols="12" md="7" lg="8">
                 <AnkerPowerPanel />
+              </v-col>
+            </v-row>
+          </v-tabs-window-item>
+
+          <v-tabs-window-item value="anker-charger" eager>
+            <v-row>
+              <v-col cols="12" md="5" lg="4">
+                <AnkerChargerConnectionPanel />
+              </v-col>
+              <v-col cols="12" md="7" lg="8">
+                <AnkerChargerPowerPanel />
               </v-col>
             </v-row>
           </v-tabs-window-item>

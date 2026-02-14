@@ -35,10 +35,34 @@ export interface AnkerBleCallbacks {
   onLog?: (message: string) => void
 }
 
-const ADVERTISED_SERVICE_UUID = 0x2215
-const FULL_SERVICE_UUID = '22150001-4002-81c5-b46e-cf057c562025'
-const WRITE_CHARACTERISTIC_UUID = '22150002-4002-81c5-b46e-cf057c562025'
-const NOTIFY_CHARACTERISTIC_UUID = '22150003-4002-81c5-b46e-cf057c562025'
+export interface AnkerBleProfile {
+  name: string
+  advertisedServiceUuids: BluetoothServiceUUID[]
+  fullServiceUuid: BluetoothServiceUUID
+  writeCharacteristicUuid: string
+  notifyCharacteristicUuid: string
+  statusCommands: number[]
+}
+
+export const ANKER_POWERBANK_PROFILE: AnkerBleProfile = {
+  name: 'Powerbank',
+  advertisedServiceUuids: [0x2215, 0xff09],
+  fullServiceUuid: '22150001-4002-81c5-b46e-cf057c562025',
+  writeCharacteristicUuid: '22150002-4002-81c5-b46e-cf057c562025',
+  notifyCharacteristicUuid: '22150003-4002-81c5-b46e-cf057c562025',
+  statusCommands: [0x0500],
+}
+
+export const ANKER_CHARGER_PROFILE: AnkerBleProfile = {
+  name: 'Charger',
+  advertisedServiceUuids: [0x8c85, 0xff09],
+  fullServiceUuid: '8c850001-0302-41c5-b46e-cf057c562025',
+  writeCharacteristicUuid: '8c850002-0302-41c5-b46e-cf057c562025',
+  notifyCharacteristicUuid: '8c850003-0302-41c5-b46e-cf057c562025',
+  // Observed in real A2687 capture as encrypted group 0x11 responses:
+  // 0x0200, 0x020a, 0x0300.
+  statusCommands: [0x0200, 0x020a, 0x0300],
+}
 
 const A2_STATIC_HEX = '32633337376466613039636462373932343838396534323932613337663631633863356564353264'
 const FRAME_HEADER_1 = 0xff
@@ -59,6 +83,18 @@ const CMD_SESSION_KEY = 0x0022
 const CMD_STATUS_FULL = 0x0500
 const CMD_STATUS_ALT_FULL = 0x0d00
 const CMD_STATUS_LIVE = 0x050e
+const CMD_CHARGER_STATUS_FULL = 0x0200
+const CMD_CHARGER_STATUS_LIVE = 0x0300
+const CMD_CHARGER_STATUS_AUX = 0x020a
+const SOLIX_NEGOTIATION_TIMEOUT_MS = 90_000
+const SOLIX_NEGOTIATION_RETRY_MS = 3_000
+const SOLIX_PRIVATE_KEY_HEX = '7dfbea61cd95cee49c458ad7419e817f1ade9a66136de3c7d5787af1458e39f4'
+const SOLIX_NEGOTIATION_COMMAND_0 = 'ff0936000300010001a10442ad8c69a22462326463306231372d623735642d346162662d626136652d656337633939376332336537b9'
+const SOLIX_NEGOTIATION_COMMAND_1 = 'ff093d000300010003a10442ad8c69a22462326463306231372d623735642d346162662d626136652d656337633939376332336537a30120a40200f064'
+const SOLIX_NEGOTIATION_COMMAND_2 = 'ff0936000300010029a10442ad8c69a22462326463306231372d623735642d346162662d626136652d65633763393937633233653791'
+const SOLIX_NEGOTIATION_COMMAND_3 = 'ff0940000300010005a10443ad8c69a22462326463306231372d623735642d346162662d626136652d656337633939376332336537a30120a40200f0a50140fa'
+const SOLIX_NEGOTIATION_COMMAND_4 = 'ff094c000300010021a140060ea168f232aedb37fb2d120c49180329ac72ab5ec3eb8fd30a2f252dc5e151dabccd9b1dc1e288704ca760a0d8c918e5c94823a1f609a4bf07fb4c33ee219085'
+const SOLIX_NEGOTIATION_COMMAND_5 = 'ff095a000300014022580bc0532a53c739adf3da7b994a7b5f221bcc16bab6392c215cb4faaf41d9d58e2c81c016e474c78eed5569147cb74a1f22ca2b3fad2e209dbbcfbdaca352034a6c479f055f68581b5f1e22348809f526'
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2)
@@ -150,9 +186,33 @@ function describeTlvArray(tlvArray: { type: number; value: Uint8Array }[]): stri
     .join(', ')
 }
 
+function normalizeIvFromSerial(serial: string): Uint8Array {
+  const serialBytes = new TextEncoder().encode(serial)
+  if (serialBytes.length === 16) return serialBytes
+
+  const iv = new Uint8Array(16)
+  if (serialBytes.length > 16) {
+    iv.set(serialBytes.slice(0, 16), 0)
+  } else {
+    iv.set(serialBytes, 0)
+  }
+  return iv
+}
+
+function isAckOnlyStatusTlv(tlv: Map<number, Uint8Array>): boolean {
+  return tlv.size === 1 && tlv.has(0xa1) && tlv.get(0xa1)!.length === 1
+}
+
 function getModeString(mode: number): 'Off' | 'Input' | 'Output' {
   if (mode === 1) return 'Input'
   if (mode === 2) return 'Output'
+  return 'Off'
+}
+
+function getSolixPortModeString(mode: number): 'Off' | 'Input' | 'Output' {
+  // SolixBLE semantics: 0=not connected, 1=output, 2=input
+  if (mode === 1) return 'Output'
+  if (mode === 2) return 'Input'
   return 'Off'
 }
 
@@ -165,8 +225,88 @@ function parsePortData(value: Uint8Array): AnkerPortData {
   return { mode, voltage, current, power: Math.round(voltage * current * 10) / 10 }
 }
 
+function parseA2687PortData(value: Uint8Array): AnkerPortData {
+  // Observed A2687 layout:
+  // [0]=0x04 layout marker, [1]=mode, [2..3]=mV, [4..5]=mA, [6..7]=deci-watts
+  if (value.length < 8) return { mode: 'Off', voltage: 0, current: 0, power: 0 }
+  const mode = getModeString(value[1] ?? 0)
+  const millivolts = parseU16LE(value, 2)
+  const currentRaw = parseU16LE(value, 4)
+  const voltage = Math.round((millivolts / 1000) * 1000) / 1000
+  // Empirical calibration: multiply prior current estimate by 10.
+  const current = Math.round((currentRaw / 1000) * 1000) / 1000
+  const computedPower = Math.round(voltage * current * 10) / 10
+  return {
+    mode,
+    voltage,
+    current,
+    power: computedPower,
+  }
+}
+
 function emptyPortData(): AnkerPortData {
   return { mode: 'Off', voltage: 0, current: 0, power: 0 }
+}
+
+function parseU16LE(data: Uint8Array, index: number): number {
+  if (index + 1 >= data.length) return 0
+  return data[index]! | (data[index + 1]! << 8)
+}
+
+function encodeDerLength(length: number): number[] {
+  if (length < 0x80) return [length]
+  if (length <= 0xff) return [0x81, length]
+  return [0x82, (length >> 8) & 0xff, length & 0xff]
+}
+
+function buildP256Pkcs8FromPrivateScalar(privateScalar: Uint8Array): Uint8Array {
+  // PKCS#8 for secp256r1 private key with ECPrivateKey payload.
+  const ecPrivateKeyBody = [0x02, 0x01, 0x01, 0x04, 0x20, ...privateScalar]
+  const ecPrivateKey = [0x30, ...encodeDerLength(ecPrivateKeyBody.length), ...ecPrivateKeyBody]
+  const algorithmIdentifier = [
+    0x30,
+    0x13,
+    0x06,
+    0x07,
+    0x2a,
+    0x86,
+    0x48,
+    0xce,
+    0x3d,
+    0x02,
+    0x01,
+    0x06,
+    0x08,
+    0x2a,
+    0x86,
+    0x48,
+    0xce,
+    0x3d,
+    0x03,
+    0x01,
+    0x07,
+  ]
+  const privateKeyOctet = [0x04, ...encodeDerLength(ecPrivateKey.length), ...ecPrivateKey]
+  const pkcs8Body = [0x02, 0x01, 0x00, ...algorithmIdentifier, ...privateKeyOctet]
+  return new Uint8Array([0x30, ...encodeDerLength(pkcs8Body.length), ...pkcs8Body])
+}
+
+type SolixTelemetryLayout = 'c300_enc' | 'c1000_enc'
+
+function detectSolixTelemetryLayout(data: Uint8Array): SolixTelemetryLayout | null {
+  if (data.byteLength < 200) return null
+  // Experimental encrypted layout in SolixBLE branch.
+  // C300 mode bytes exist at 139/143/147 and must be in [0,2].
+  const c300Mode1 = data[139] ?? 0xff
+  const c300Mode2 = data[143] ?? 0xff
+  const c300Mode3 = data[147] ?? 0xff
+  if (c300Mode1 <= 2 && c300Mode2 <= 2 && c300Mode3 <= 2) return 'c300_enc'
+
+  // C1000 encrypted layout still uses 253-byte payload in that branch.
+  const c1000Battery = data[160] ?? 0xff
+  if (c1000Battery <= 100) return 'c1000_enc'
+
+  return null
 }
 
 function emptyPowerStatus(): AnkerPowerStatus {
@@ -218,12 +358,20 @@ export class AnkerBleService {
   private decryptSuccessCount = 0
   private decryptErrorCount = 0
   private lastPowerStatus: AnkerPowerStatus = emptyPowerStatus()
+  private chargerStatusSource: 'Pending' | 'FF09' | 'SolixEncrypted' = 'Pending'
+  private chargerTelemetrySeenAt: number | null = null
+  private solixNegotiationStartedAt: number | null = null
+  private solixLastInitiationAt = 0
+  private solixNegotiationPacketCount = 0
+  private solixSharedKey: CryptoKey | null = null
   // Matches reference: resolveNextNotificationPromise pattern
   private resolveNextNotification: ((data: Uint8Array) => void) | null = null
   private callbacks: AnkerBleCallbacks
+  private profile: AnkerBleProfile
 
-  constructor(callbacks: AnkerBleCallbacks = {}) {
+  constructor(callbacks: AnkerBleCallbacks = {}, profile: AnkerBleProfile = ANKER_POWERBANK_PROFILE) {
     this.callbacks = callbacks
+    this.profile = profile
   }
 
   private log(msg: string): void {
@@ -240,21 +388,26 @@ export class AnkerBleService {
   }
 
   async connect(): Promise<void> {
+    const selectedDevice = await navigator.bluetooth.requestDevice({
+      filters: this.profile.advertisedServiceUuids.map((serviceUuid) => ({ services: [serviceUuid] })),
+      optionalServices: [this.profile.fullServiceUuid],
+    })
+    await this.connectToDevice(selectedDevice)
+  }
+
+  async connectToDevice(device: BluetoothDevice): Promise<void> {
     try {
-      this.device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: [ADVERTISED_SERVICE_UUID] }],
-        optionalServices: [FULL_SERVICE_UUID],
-      })
+      this.device = device
 
       this.device.addEventListener('gattserverdisconnected', () => {
         this.handleDisconnect()
       })
 
       const server = await this.device.gatt!.connect()
-      const service = await server.getPrimaryService(FULL_SERVICE_UUID)
+      const service = await server.getPrimaryService(this.profile.fullServiceUuid)
 
-      this.writeChar = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID)
-      this.notifyChar = await service.getCharacteristic(NOTIFY_CHARACTERISTIC_UUID)
+      this.writeChar = await service.getCharacteristic(this.profile.writeCharacteristicUuid)
+      this.notifyChar = await service.getCharacteristic(this.profile.notifyCharacteristicUuid)
 
       const wp = this.writeChar.properties
       this.log(`Write char properties: write=${wp.write} writeWithoutResponse=${wp.writeWithoutResponse}`)
@@ -269,15 +422,26 @@ export class AnkerBleService {
       })
       await this.notifyChar.startNotifications()
 
-      this.log('BLE connected, waiting for BLE stack to settle...')
+      this.log(`${this.profile.name} BLE connected, waiting for BLE stack to settle...`)
       this.callbacks.onConnectionChange?.(true)
 
       // Small delay to let BLE stack settle before handshake
       await new Promise((r) => setTimeout(r, 500))
 
-      this.log('Starting handshake...')
-      // Run handshake
-      await this.handshake()
+      if (this.profile.name === 'Charger') {
+        // A2687 traces show the app uses standard FF09 handshake/session flow.
+        this.log('Starting charger handshake/session...')
+        try {
+          await this.handshake()
+        } catch (err) {
+          // Keep the older Solix flow as fallback for charger firmware variants.
+          this.log(`Charger handshake path failed (${String(err)}), falling back to legacy Solix flow`)
+          await this.startChargerEncryptedSession()
+        }
+      } else {
+        this.log('Starting handshake...')
+        await this.handshake()
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       this.callbacks.onError?.(msg)
@@ -306,6 +470,12 @@ export class AnkerBleService {
     this.decryptSuccessCount = 0
     this.decryptErrorCount = 0
     this.lastPowerStatus = emptyPowerStatus()
+    this.chargerStatusSource = 'Pending'
+    this.chargerTelemetrySeenAt = null
+    this.solixNegotiationStartedAt = null
+    this.solixLastInitiationAt = 0
+    this.solixNegotiationPacketCount = 0
+    this.solixSharedKey = null
     this.resolveNextNotification = null
     this.callbacks.onCryptoStateChange?.('INACTIVE')
     this.callbacks.onConnectionChange?.(false)
@@ -344,6 +514,10 @@ export class AnkerBleService {
   private handleNotification(rawData: Uint8Array): void {
     this.log(`<-- RECV (${rawData.byteLength} bytes) ${toHexString(rawData)}`)
 
+    if (this.profile.name === 'Charger') {
+      if (this.tryHandleChargerSolixNotification(rawData)) return
+    }
+
     // Short packet — still resolve pending promise (reference does this)
     if (rawData.byteLength < 5) {
       if (this.resolveNextNotification) {
@@ -377,10 +551,26 @@ export class AnkerBleService {
         if (!this.activeKey) {
           this.log('    No active key for decryption')
         } else {
-          // Encrypted responses: ciphertext starts at offset 5 (no status byte)
-          const cipherText = payloadWithHeader.slice(5)
+          // Some charger responses include a status byte before ciphertext.
+          const candidates: Uint8Array[] = [payloadWithHeader.slice(5)]
+          if (payloadWithHeader.length > 6) candidates.push(payloadWithHeader.slice(6))
+
+          const tryDecrypt = async (): Promise<Uint8Array> => {
+            let lastErr: unknown = null
+            for (const candidate of candidates) {
+              if (candidate.length < 16) continue
+              if (candidate.length % 16 !== 0) continue
+              try {
+                return await this.decrypt(candidate)
+              } catch (err) {
+                lastErr = err
+              }
+            }
+            throw lastErr ?? new Error('No valid encrypted payload candidate')
+          }
+
           // Decrypt async — resolve promise after decryption completes
-          this.decrypt(cipherText)
+          tryDecrypt()
             .then((decrypted) => {
               this.decryptSuccessCount++
               this.log(`    Decrypted: ${toHexString(decrypted)}`)
@@ -422,6 +612,46 @@ export class AnkerBleService {
     }
   }
 
+  private tryHandleChargerSolixNotification(rawData: Uint8Array): boolean {
+    if (this.chargerStatusSource === 'FF09') return false
+
+    if (
+      rawData.byteLength === 5 &&
+      rawData[0] === 0x68 &&
+      rawData[1] === 0x65 &&
+      rawData[2] === 0x6c &&
+      rawData[3] === 0x6c &&
+      rawData[4] === 0x6f
+    ) {
+      this.log('    Ignoring charger heartbeat payload "hello"')
+      return true
+    }
+
+    // If it's a normal FF09-framed packet, let the generic parser handle it.
+    // Real A2687 captures use framed encrypted commands (group 0x01/0x11).
+    if (this.isFramedPacket(rawData)) return false
+
+    if (!this.solixSharedKey) {
+      if (!this.solixNegotiationStartedAt) return false
+      this.solixNegotiationPacketCount++
+      void this.handleSolixNegotiationPacket(rawData).catch((err) => {
+        this.log(`Solix negotiation packet handling failed: ${String(err)}`)
+      })
+      return false
+    }
+
+    if (rawData.byteLength < 100) return false
+
+    void this.tryParseEncryptedSolixTelemetry(rawData).catch((err) => {
+      this.log(`Encrypted charger telemetry parse failed: ${String(err)}`)
+    })
+    return true
+  }
+
+  private isFramedPacket(rawData: Uint8Array): boolean {
+    return rawData.byteLength >= 5 && rawData[0] === FRAME_HEADER_1 && rawData[1] === FRAME_HEADER_2
+  }
+
   private handlePlainResponse(command: number, tlvData: Uint8Array): void {
     const normalizedCommand = command & ~COMMAND_ACK_MASK_16
     const tlv = parseTlv(tlvData)
@@ -431,14 +661,17 @@ export class AnkerBleService {
       const firmware = tlv.has(0xa3) ? new TextDecoder().decode(tlv.get(0xa3)!) : ''
       const serial = tlv.has(0xa4) ? new TextDecoder().decode(tlv.get(0xa4)!) : ''
       const macBytes = tlv.get(0xa5)
-      const mac = macBytes
-        ? Array.from(macBytes)
+      const mac = macBytes && macBytes.length >= 6
+        ? Array.from(macBytes.slice(0, 6))
             .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
             .join(':')
         : ''
 
       this.serialNumber = serial
       this.log(`    Device: serial=${serial} mac=${mac} fw=${firmware}`)
+      if (this.profile.name === 'Charger' && firmware) {
+        this.log(`    Charger firmware field appears to be BLE-module firmware; main charger FW may differ`)
+      }
       this.callbacks.onDeviceInfo?.({ mac, serial, firmware })
     }
   }
@@ -459,10 +692,80 @@ export class AnkerBleService {
 
     // Status response
     if (normalizedCommand === CMD_STATUS_FULL || normalizedCommand === CMD_STATUS_ALT_FULL) {
+      if (isAckOnlyStatusTlv(tlv)) {
+        this.log(`    ACK-only status response for 0x${normalizedCommand.toString(16).padStart(4, '0')}, waiting for data`)
+        return
+      }
       this.parseComprehensiveStatus(tlv)
     } else if (normalizedCommand === CMD_STATUS_LIVE) {
+      if (isAckOnlyStatusTlv(tlv)) {
+        this.log('    ACK-only live-status response (0x050e), waiting for data')
+        return
+      }
       this.parseLivePowerStatus(tlv)
+    } else if (
+      normalizedCommand === CMD_CHARGER_STATUS_FULL ||
+      normalizedCommand === CMD_CHARGER_STATUS_LIVE ||
+      normalizedCommand === CMD_CHARGER_STATUS_AUX
+    ) {
+      if (isAckOnlyStatusTlv(tlv)) {
+        this.log(
+          `    ACK-only charger status response for 0x${normalizedCommand.toString(16).padStart(4, '0')}, waiting for data`,
+        )
+        return
+      }
+      this.parseA2687Status(tlv, normalizedCommand)
     }
+  }
+
+  private parseA2687Status(tlv: Map<number, Uint8Array>, command: number): void {
+    const status = clonePowerStatus(this.lastPowerStatus)
+
+    // Observed A2687 totals:
+    // A2: [02, lo, hi] output deci-watts
+    // A3: [02, lo, hi] input deci-watts
+    let tlvOutW: number | null = null
+    let tlvInW: number | null = null
+    const totalOut = tlv.get(0xa2)
+    if (totalOut && totalOut.length >= 3) {
+      tlvOutW = parseU16LE(totalOut, 1) / 10
+    }
+    const totalIn = tlv.get(0xa3)
+    if (totalIn && totalIn.length >= 3) {
+      tlvInW = parseU16LE(totalIn, 1) / 10
+    }
+
+    // User-validated mapping:
+    // A5 -> C1, A6 -> C2, A7 -> C3
+    if (tlv.has(0xa5)) status.usbC1 = parseA2687PortData(tlv.get(0xa5)!)
+    if (tlv.has(0xa6)) status.usbC2 = parseA2687PortData(tlv.get(0xa6)!)
+    if (tlv.has(0xa7)) status.usbA = parseA2687PortData(tlv.get(0xa7)!)
+
+    const ports = [status.usbC1, status.usbC2, status.usbA]
+    for (const port of ports) {
+      const hasPower = port.power > 0 || port.current > 0 || port.voltage > 0
+      port.mode = hasPower ? 'Output' : 'Off'
+    }
+    const computedOutW = Math.round(ports.reduce((sum, p) => sum + Math.max(0, p.power), 0) * 10) / 10
+
+    // Charger is AC->DC output device; keep totals output-centric.
+    status.totalOutputW = computedOutW
+    status.totalInputW = computedOutW
+
+    // Optional charger scalar fields observed in captures.
+    const tempOrState = tlv.get(0xa9)
+    if (tempOrState && tempOrState.length >= 2) {
+      const candidate = tempOrState[1] ?? status.temperature
+      if (candidate <= 120) status.temperature = candidate
+    }
+
+    this.lastPowerStatus = status
+    this.chargerStatusSource = 'FF09'
+    this.chargerTelemetrySeenAt = Date.now()
+    this.log(
+      `    A2687 Status(0x${command.toString(16).padStart(4, '0')}): out=${status.totalOutputW}W in=${status.totalInputW}W C1=${status.usbC1.power}W C2=${status.usbC2.power}W C3=${status.usbA.power}W`,
+    )
+    this.callbacks.onPowerStatus?.(status)
   }
 
   private parseComprehensiveStatus(tlv: Map<number, Uint8Array>): void {
@@ -491,6 +794,10 @@ export class AnkerBleService {
     if (tlv.has(0xa6)) status.usbA = parsePortData(tlv.get(0xa6)!)
 
     this.lastPowerStatus = status
+    if (this.profile.name === 'Charger') {
+      this.chargerStatusSource = 'FF09'
+      this.chargerTelemetrySeenAt = Date.now()
+    }
     this.log(`    Status: ${status.batteryPercent}% ${status.temperature}°C out=${status.totalOutputW}W in=${status.totalInputW}W`)
     this.callbacks.onPowerStatus?.(status)
   }
@@ -517,10 +824,282 @@ export class AnkerBleService {
     }
 
     this.lastPowerStatus = status
+    if (this.profile.name === 'Charger') {
+      this.chargerStatusSource = 'FF09'
+      this.chargerTelemetrySeenAt = Date.now()
+    }
     this.log(
       `    Live Status: ${status.batteryPercent}% ${status.temperature}°C out=${status.totalOutputW}W in=${status.totalInputW}W`,
     )
     this.callbacks.onPowerStatus?.(status)
+  }
+
+  private parseSolixTelemetry(rawData: Uint8Array): boolean {
+    // Encrypted telemetry branch uses fixed byte offsets after decrypt.
+    if (rawData.byteLength < 100) return false
+    const layout = detectSolixTelemetryLayout(rawData)
+    if (!layout) return false
+
+    const status = clonePowerStatus(this.lastPowerStatus)
+
+    if (layout === 'c300_enc') {
+      // C300 encrypted layout from experimental SolixBLE branch.
+      status.batteryPercent = rawData[131] ?? status.batteryPercent
+      status.totalInputW = parseU16LE(rawData, 65)
+      status.totalOutputW = parseU16LE(rawData, 70)
+
+      status.usbC1 = {
+        mode: getSolixPortModeString(rawData[139] ?? 0),
+        voltage: 0,
+        current: 0,
+        power: rawData[35] ?? 0,
+      }
+      status.usbC2 = {
+        mode: getSolixPortModeString(rawData[143] ?? 0),
+        voltage: 0,
+        current: 0,
+        power: rawData[40] ?? 0,
+      }
+      status.usbA = {
+        // Shared field for charger USB-C3 in current UI model.
+        mode: getSolixPortModeString(rawData[147] ?? 0),
+        voltage: 0,
+        current: 0,
+        power: rawData[45] ?? 0,
+      }
+    } else {
+      // C1000 encrypted layout from branch.
+      status.batteryPercent = rawData[160] ?? status.batteryPercent
+      status.totalInputW = parseU16LE(rawData, 75)
+      status.totalOutputW = parseU16LE(rawData, 80)
+
+      status.usbC1 = {
+        mode: getSolixPortModeString(rawData[139] ?? 0),
+        voltage: 0,
+        current: 0,
+        power: rawData[35] ?? 0,
+      }
+      status.usbC2 = {
+        mode: getSolixPortModeString(rawData[143] ?? 0),
+        voltage: 0,
+        current: 0,
+        power: rawData[40] ?? 0,
+      }
+      status.usbA = {
+        mode: getSolixPortModeString(rawData[147] ?? 0),
+        voltage: 0,
+        current: 0,
+        power: rawData[45] ?? 0,
+      }
+    }
+
+    this.lastPowerStatus = status
+    this.chargerStatusSource = 'SolixEncrypted'
+    this.chargerTelemetrySeenAt = Date.now()
+    this.log(
+      `    Charger Telemetry(${layout}, decrypted ${rawData.byteLength}B): out=${status.totalOutputW}W in=${status.totalInputW}W`,
+    )
+    this.callbacks.onPowerStatus?.(status)
+    return true
+  }
+
+  private async tryParseEncryptedSolixTelemetry(rawData: Uint8Array): Promise<void> {
+    const decrypted = await this.decryptSolixTelemetryPacket(rawData)
+    if (!decrypted) return
+    this.log(`    Decrypted charger telemetry (${decrypted.byteLength}B)`)
+    if (!this.parseSolixTelemetry(decrypted)) {
+      this.log(`    Decrypted charger payload not recognized (${decrypted.byteLength}B)`)
+    }
+  }
+
+  private async sendRawCommandPacket(hex: string): Promise<void> {
+    if (!this.writeChar) return
+    const packet = hexToBytes(hex)
+    this.log(`--> SEND RAW (${packet.byteLength} bytes) ${toHexString(packet)}`)
+    if (this.writeChar.properties.write) {
+      try {
+        await this.writeChar.writeValueWithResponse(packet)
+        return
+      } catch {
+        // Fall through to write-without-response path.
+      }
+    }
+    await this.writeChar.writeValueWithoutResponse(packet)
+  }
+
+  private async startSolixNegotiationIfNeeded(): Promise<void> {
+    if (this.solixSharedKey) return
+    const now = Date.now()
+    if (!this.solixNegotiationStartedAt) {
+      this.solixNegotiationStartedAt = now
+      this.solixLastInitiationAt = 0
+      this.solixNegotiationPacketCount = 0
+      this.log('Starting charger encrypted telemetry negotiation')
+    }
+
+    if (now - this.solixNegotiationStartedAt > SOLIX_NEGOTIATION_TIMEOUT_MS) {
+      this.log('Charger encrypted telemetry negotiation timed out')
+      return
+    }
+
+    if (now - this.solixLastInitiationAt >= SOLIX_NEGOTIATION_RETRY_MS) {
+      this.solixLastInitiationAt = now
+      await this.sendRawCommandPacket(SOLIX_NEGOTIATION_COMMAND_0)
+    }
+  }
+
+  private async handleSolixNegotiationPacket(rawData: Uint8Array): Promise<void> {
+    switch (this.solixNegotiationPacketCount) {
+      case 1:
+        await this.sendRawCommandPacket(SOLIX_NEGOTIATION_COMMAND_1)
+        return
+      case 2:
+        await this.sendRawCommandPacket(SOLIX_NEGOTIATION_COMMAND_2)
+        return
+      case 3:
+        await this.sendRawCommandPacket(SOLIX_NEGOTIATION_COMMAND_3)
+        return
+      case 4:
+        await this.sendRawCommandPacket(SOLIX_NEGOTIATION_COMMAND_4)
+        return
+      case 5:
+        this.log('Calculating Solix shared key')
+        await this.calculateAndStoreSolixSharedKey(rawData)
+        await this.sendRawCommandPacket(SOLIX_NEGOTIATION_COMMAND_5)
+        this.cryptoState = 'Session'
+        this.callbacks.onCryptoStateChange?.('Session')
+        this.log('Solix shared key established')
+        this.solixNegotiationStartedAt = null
+        return
+      default:
+        return
+    }
+  }
+
+  private async calculateAndStoreSolixSharedKey(rawData: Uint8Array): Promise<void> {
+    const publicKeyTail = rawData.slice(12, rawData.byteLength - 1)
+    if (publicKeyTail.length !== 64) {
+      throw new Error(`Unexpected charger public key payload length: ${publicKeyTail.length}`)
+    }
+
+    const devicePublicKey = new Uint8Array(65)
+    devicePublicKey[0] = 0x04
+    devicePublicKey.set(publicKeyTail, 1)
+
+    const importedDevicePublicKey = await crypto.subtle.importKey(
+      'raw',
+      devicePublicKey as unknown as ArrayBuffer,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      [],
+    )
+
+    const privateScalar = hexToBytes(SOLIX_PRIVATE_KEY_HEX)
+    const privatePkcs8 = buildP256Pkcs8FromPrivateScalar(privateScalar)
+    const importedPrivateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      privatePkcs8 as unknown as ArrayBuffer,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      ['deriveBits'],
+    )
+
+    const sharedSecretBits = await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: importedDevicePublicKey },
+      importedPrivateKey,
+      256,
+    )
+    const sharedSecret = new Uint8Array(sharedSecretBits).slice(0, 16)
+    this.solixSharedKey = await crypto.subtle.importKey(
+      'raw',
+      sharedSecret as unknown as ArrayBuffer,
+      { name: 'AES-CBC', length: 128 },
+      false,
+      ['decrypt'],
+    )
+  }
+
+  private async decryptSolixTelemetryPacket(rawData: Uint8Array): Promise<Uint8Array | null> {
+    if (!this.solixSharedKey) return null
+    if (rawData.byteLength <= 45) return null
+
+    const encryptedPayload = rawData.slice(10, rawData.byteLength - 35)
+    if (encryptedPayload.byteLength < 16) return null
+
+    const encryptedLength = encryptedPayload.byteLength - (encryptedPayload.byteLength % 16)
+    if (encryptedLength < 16) return null
+    const encryptedBlockAligned = encryptedPayload.slice(0, encryptedLength)
+
+    try {
+      const result = await crypto.subtle.decrypt(
+        { name: 'AES-CBC', iv: new Uint8Array(16) as unknown as ArrayBuffer },
+        this.solixSharedKey,
+        encryptedBlockAligned as unknown as ArrayBuffer,
+      )
+      return new Uint8Array(result)
+    } catch (err) {
+      this.log(`    Failed to decrypt charger telemetry packet: ${String(err)}`)
+      return null
+    }
+  }
+
+  private async startChargerEncryptedSession(): Promise<void> {
+    this.solixNegotiationStartedAt = Date.now()
+    this.solixLastInitiationAt = 0
+    this.solixNegotiationPacketCount = 0
+    this.solixSharedKey = null
+    this.chargerTelemetrySeenAt = null
+    this.chargerStatusSource = 'Pending'
+    this.cryptoState = 'Initial'
+    this.callbacks.onCryptoStateChange?.('Initial')
+
+    const start = Date.now()
+    while (this.solixNegotiationPacketCount === 0) {
+      if (Date.now() - start > SOLIX_NEGOTIATION_TIMEOUT_MS) {
+        throw new Error('Timed out waiting for charger encrypted negotiation response')
+      }
+      await this.startSolixNegotiationIfNeeded()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+
+    while (!this.solixSharedKey) {
+      if (Date.now() - start > SOLIX_NEGOTIATION_TIMEOUT_MS) {
+        throw new Error('Timed out waiting for charger encrypted shared key')
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+
+    const telemetryDeadline = Date.now() + SOLIX_NEGOTIATION_TIMEOUT_MS
+    while (!this.chargerTelemetrySeenAt && Date.now() < telemetryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+
+    if (!this.chargerTelemetrySeenAt) {
+      throw new Error('Timed out waiting for charger telemetry after encrypted key establishment')
+    }
+  }
+
+  private async readChargerTelemetryCharacteristic(): Promise<void> {
+    if (!this.notifyChar?.properties.read) return
+    try {
+      const value = await this.notifyChar.readValue()
+      const data = new Uint8Array(value.buffer as ArrayBuffer)
+      this.log(`<-- READ (${data.byteLength} bytes) ${toHexString(data)}`)
+      this.handleNotification(data)
+    } catch (err) {
+      this.log(`Charger telemetry read failed: ${String(err)}`)
+    }
+  }
+
+  private async sendChargerStatusProbe(): Promise<void> {
+    // Some charger firmware revisions only emit telemetry after an explicit status request.
+    // Try the known status command set as plain FF09-framed probes.
+    const probeTlv = [{ type: 0xa1, value: new Uint8Array([0x21]) }]
+    for (const command of this.profile.statusCommands) {
+      const payload = buildRequestContent(command, probeTlv, GROUP_STATUS)
+      this.log(`Sending charger status probe 0x${command.toString(16).padStart(4, '0')}`)
+      await this.sendPayload(payload)
+    }
   }
 
   private async handshake(): Promise<void> {
@@ -579,9 +1158,9 @@ export class AnkerBleService {
 
     // Setup initial encryption
     const initialKey = hexToBytes(A2_STATIC_HEX.substring(0, 32))
-    const iv = new TextEncoder().encode(this.serialNumber)
+    const iv = normalizeIvFromSerial(this.serialNumber)
     this.log(`Initial key (${initialKey.length} bytes): ${toHexString(initialKey)}`)
-    this.log(`IV from serial "${this.serialNumber}" (${iv.length} bytes): ${toHexString(iv)}`)
+    this.log(`IV from serial "${this.serialNumber}" normalized to ${iv.length} bytes: ${toHexString(iv)}`)
     await this.setupCrypto(initialKey, iv, 'Initial')
 
     const sessionKeyTlvs = [
@@ -698,8 +1277,18 @@ export class AnkerBleService {
       throw new Error(`Session key is not active. Current crypto state: ${this.cryptoState}`)
     }
 
-    await this.sendEncrypted(GROUP_STATUS, CMD_STATUS_FULL, [
-      { type: 0xa1, value: new Uint8Array([0x21]) },
-    ])
+    if (this.profile.name === 'Charger') {
+      // Helpful with firmware that only emits heartbeat unless poked.
+      await this.readChargerTelemetryCharacteristic()
+    }
+
+    for (const command of this.profile.statusCommands) {
+      await this.sendEncrypted(GROUP_STATUS, command, [{ type: 0xa1, value: new Uint8Array([0x21]) }])
+    }
+
+    if (this.profile.name === 'Charger') {
+      // Keep plain probes as a fallback trigger for charger variants.
+      await this.sendChargerStatusProbe()
+    }
   }
 }

@@ -1,5 +1,5 @@
 import { createAnkerDeviceStore } from './createAnkerDeviceStore'
-import { ANKER_POWERBANK_PROFILE } from '../services/anker-ble'
+import { ANKER_CHARGER_PROFILE } from '../services/anker-ble'
 
 export {
   type PortActivity,
@@ -9,4 +9,4 @@ export {
   type TelemetrySeries,
 } from './createAnkerDeviceStore'
 
-export const useAnkerBattery = createAnkerDeviceStore(ANKER_POWERBANK_PROFILE)
+export const useAnkerCharger = createAnkerDeviceStore(ANKER_CHARGER_PROFILE)
