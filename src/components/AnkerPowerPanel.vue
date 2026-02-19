@@ -21,7 +21,7 @@ const {
   resetTelemetryHistory,
 } = useAnkerBattery()
 
-const autoRefresh = ref(false)
+const autoRefresh = ref(true)
 const pollInterval = ref(2000)
 
 watch(autoRefresh, (enabled) => {
@@ -33,9 +33,8 @@ watch(autoRefresh, (enabled) => {
 })
 
 watch(connected, (isConnected) => {
-  if (!isConnected) {
-    autoRefresh.value = false
-  }
+  if (isConnected && autoRefresh.value) startPolling(pollInterval.value)
+  if (!isConnected) autoRefresh.value = true
 })
 
 function modeColor(mode: string): string {
@@ -100,6 +99,7 @@ const lastPolledLabel = computed(() => {
         label="Auto"
         density="compact"
         hide-details
+        color="success"
         class="mr-2 flex-grow-0"
         :disabled="!connected"
       />

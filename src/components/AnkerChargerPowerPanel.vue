@@ -22,7 +22,7 @@ const {
   resetTelemetryHistory,
 } = useAnkerCharger()
 
-const autoRefresh = ref(false)
+const autoRefresh = ref(true)
 const pollInterval = ref(2000)
 
 watch(autoRefresh, (enabled) => {
@@ -36,7 +36,8 @@ watch(autoRefresh, (enabled) => {
 watch(
   connected,
   (isConnected) => {
-    autoRefresh.value = isConnected
+    if (isConnected && autoRefresh.value) startPolling(pollInterval.value)
+    if (!isConnected) autoRefresh.value = true
   },
   { immediate: true },
 )
@@ -120,6 +121,7 @@ async function togglePort(port: TelemetryPortKey) {
         label="Auto"
         density="compact"
         hide-details
+        color="success"
         class="mr-2 flex-grow-0"
         :disabled="!connected"
       />

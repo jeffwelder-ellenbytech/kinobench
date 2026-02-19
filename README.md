@@ -1,5 +1,32 @@
-# Vue 3 + TypeScript + Vite
+# KinoBench
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+KinoBench is a no-nonsense hardware workbench web app for talking to real devices over USB Serial and Bluetooth LE.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+Direct control without vendor bloat.
+
+## Web App
+
+https://jeffwelder-ellenbytech.github.io/kinobench/
+
+[Developed in the USA, btw]
+
+## Supported Hardware
+
+- Bus Pirate (Web Serial)
+- Anker Prime Power series power banks (BLE)
+- Anker Prime chargers (BLE)
+- Alientek EL15 electronic load (BLE)
+
+## What It Does
+
+- Connect/disconnect to supported hardware from the browser
+- Poll live telemetry and view status in real time
+- Run device-specific controls (like charger port output toggles)
+- Show active BLE connection state directly in the UI tabs
+
+## Local Development
+
+```bash
+bun install
+bun run dev
+```
