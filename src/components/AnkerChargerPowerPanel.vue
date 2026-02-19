@@ -33,11 +33,13 @@ watch(autoRefresh, (enabled) => {
   }
 })
 
-watch(connected, (isConnected) => {
-  if (!isConnected) {
-    autoRefresh.value = false
-  }
-})
+watch(
+  connected,
+  (isConnected) => {
+    autoRefresh.value = isConnected
+  },
+  { immediate: true },
+)
 
 function modeColor(mode: string): string {
   if (mode === 'Output') return 'success'

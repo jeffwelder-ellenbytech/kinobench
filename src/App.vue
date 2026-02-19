@@ -10,8 +10,14 @@ import AnkerChargerConnectionPanel from './components/AnkerChargerConnectionPane
 import AnkerChargerPowerPanel from './components/AnkerChargerPowerPanel.vue'
 import AlientekConnectionPanel from './components/AlientekConnectionPanel.vue'
 import AlientekModeOnePanel from './components/AlientekModeOnePanel.vue'
+import { useAnkerBattery } from './composables/useAnkerBattery'
+import { useAnkerCharger } from './composables/useAnkerCharger'
+import { useAlientekModeOne } from './composables/useAlientekModeOne'
 
 const activeTab = ref('alientek')
+const { connected: ankerConnected } = useAnkerBattery()
+const { connected: ankerChargerConnected } = useAnkerCharger()
+const { connected: alientekConnected } = useAlientekModeOne()
 </script>
 
 <template>
@@ -27,9 +33,24 @@ const activeTab = ref('alientek')
       <v-container fluid class="pa-4">
         <v-tabs v-model="activeTab" class="mb-4">
           <v-tab value="buspirate" prepend-icon="mdi-usb">Bus Pirate</v-tab>
-          <v-tab value="anker" prepend-icon="mdi-battery">Anker Powerbank</v-tab>
-          <v-tab value="anker-charger" prepend-icon="mdi-flash">Anker Charger</v-tab>
-          <v-tab value="alientek" prepend-icon="mdi-resistor-nodes">Alientek EL15</v-tab>
+          <v-tab value="anker" prepend-icon="mdi-battery">
+            Anker Powerbank
+            <v-icon v-if="ankerConnected" icon="mdi-bluetooth" size="16" color="blue" class="ml-1" />
+          </v-tab>
+          <v-tab value="anker-charger" prepend-icon="mdi-flash">
+            Anker Charger
+            <v-icon
+              v-if="ankerChargerConnected"
+              icon="mdi-bluetooth"
+              size="16"
+              color="blue"
+              class="ml-1"
+            />
+          </v-tab>
+          <v-tab value="alientek" prepend-icon="mdi-resistor-nodes">
+            Alientek EL15
+            <v-icon v-if="alientekConnected" icon="mdi-bluetooth" size="16" color="blue" class="ml-1" />
+          </v-tab>
         </v-tabs>
 
         <v-tabs-window v-model="activeTab">

@@ -38,6 +38,7 @@ export interface AnkerBleCallbacks {
 export interface AnkerBleProfile {
   name: string
   advertisedServiceUuids: BluetoothServiceUUID[]
+  deviceNamePrefixes?: string[]
   fullServiceUuid: BluetoothServiceUUID
   writeCharacteristicUuid: string
   notifyCharacteristicUuid: string
@@ -47,6 +48,7 @@ export interface AnkerBleProfile {
 export const ANKER_POWERBANK_PROFILE: AnkerBleProfile = {
   name: 'Powerbank',
   advertisedServiceUuids: [0x2215, 0xff09],
+  deviceNamePrefixes: ['Anker Prime Power'],
   fullServiceUuid: '22150001-4002-81c5-b46e-cf057c562025',
   writeCharacteristicUuid: '22150002-4002-81c5-b46e-cf057c562025',
   notifyCharacteristicUuid: '22150003-4002-81c5-b46e-cf057c562025',
@@ -509,9 +511,24 @@ export class AnkerBleService {
     return this.cryptoState
   }
 
+  private isAllowedDeviceName(deviceName: string | undefined): boolean {
+    const prefixes = this.profile.deviceNamePrefixes
+    if (!prefixes?.length) return true
+    if (!deviceName) return false
+    return prefixes.some((prefix) => deviceName.startsWith(prefix))
+  }
+
   async connect(): Promise<void> {
+    const namePrefixes = this.profile.deviceNamePrefixes ?? []
+    const filters =
+      namePrefixes.length > 0
+        ? this.profile.advertisedServiceUuids.flatMap((serviceUuid) =>
+            namePrefixes.map((namePrefix) => ({ services: [serviceUuid], namePrefix })),
+          )
+        : this.profile.advertisedServiceUuids.map((serviceUuid) => ({ services: [serviceUuid] }))
+
     const selectedDevice = await navigator.bluetooth.requestDevice({
-      filters: this.profile.advertisedServiceUuids.map((serviceUuid) => ({ services: [serviceUuid] })),
+      filters,
       optionalServices: [this.profile.fullServiceUuid],
     })
     await this.connectToDevice(selectedDevice)
@@ -519,6 +536,12 @@ export class AnkerBleService {
 
   async connectToDevice(device: BluetoothDevice): Promise<void> {
     try {
+      if (!this.isAllowedDeviceName(device.name)) {
+        throw new Error(
+          `Selected device "${device.name ?? 'Unknown'}" is not supported for ${this.profile.name}.`,
+        )
+      }
+
       this.device = device
 
       this.device.addEventListener('gattserverdisconnected', () => {
@@ -565,6 +588,7 @@ export class AnkerBleService {
         await this.handshake()
       }
     } catch (err) {
+      this.disconnect()
       const msg = err instanceof Error ? err.message : String(err)
       this.callbacks.onError?.(msg)
       throw err
