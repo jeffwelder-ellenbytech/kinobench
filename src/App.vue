@@ -9,7 +9,7 @@ import AnkerPowerPanel from './components/AnkerPowerPanel.vue'
 import AnkerChargerConnectionPanel from './components/AnkerChargerConnectionPanel.vue'
 import AnkerChargerPowerPanel from './components/AnkerChargerPowerPanel.vue'
 import AlientekConnectionPanel from './components/AlientekConnectionPanel.vue'
-import AlientekModeOnePanel from './components/AlientekModeOnePanel.vue'
+import AlientekEl15Panel from './components/AlientekEl15Panel.vue'
 import { useAnkerBattery } from './composables/useAnkerBattery'
 import { useAnkerCharger } from './composables/useAnkerCharger'
 import { useAlientekModeOne } from './composables/useAlientekModeOne'
@@ -95,7 +95,7 @@ const { connected: alientekConnected } = useAlientekModeOne()
                 <AlientekConnectionPanel />
               </v-col>
               <v-col cols="12" md="7" lg="8">
-                <AlientekModeOnePanel />
+                <AlientekEl15Panel />
               </v-col>
             </v-row>
           </v-tabs-window-item>

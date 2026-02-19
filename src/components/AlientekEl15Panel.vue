@@ -6,6 +6,7 @@ const { connected, status, refreshStatus, setLoad, setLock, setCurrent, setBasic
 
 type MainMode = 'Basic' | 'Battery' | 'Power' | 'Advanced'
 type BasicSubMode = 'cc' | 'cv' | 'cr' | 'cp'
+type BatterySubMode = 'capacity' | 'dcr'
 
 const autoRefresh = ref(true)
 const pollInterval = ref(1000)
@@ -19,8 +20,11 @@ const setCurrentInput = ref(2)
 const cvVoltageInput = ref(5.0)
 const crResistanceInput = ref(10.0)
 const cpPowerInput = ref(10.0)
-const activeMainMode = ref<MainMode>('Basic')
+const dcrCurrentI1Ma = ref(20)
+const dcrCurrentI2Ma = ref(1000)
+const activeMainMode = ref<MainMode | null>(null)
 const basicSubMode = ref<BasicSubMode>('cc')
+const batterySubMode = ref<BatterySubMode>('capacity')
 const syncFromStatus = ref(false)
 
 const mainModes: MainMode[] = ['Basic', 'Battery', 'Power', 'Advanced']
@@ -39,6 +43,9 @@ const power = computed(() => status.value.power)
 const tempF = computed(() => status.value.tempF)
 const runtimeLabel = computed(() => status.value.runTimeLabel)
 const modeLabel = computed(() => {
+  if (activeMainMode.value === null) return 'MENU'
+  if (isBatteryCapacityMode.value) return 'CAP'
+  if (isBatteryDcrMode.value) return 'DCR'
   if (activeMainMode.value !== 'Basic') return activeMainMode.value.toUpperCase()
   if (basicSubMode.value === 'cc') return 'CC'
   if (basicSubMode.value === 'cv') return 'CV'
@@ -46,8 +53,13 @@ const modeLabel = computed(() => {
   if (basicSubMode.value === 'cp') return 'CP'
   return `M${status.value.mode}`
 })
-const profileLabel = computed(() => activeMainMode.value)
+const profileLabel = computed(() => activeMainMode.value ?? 'Menu')
 const isBasicMode = computed(() => activeMainMode.value === 'Basic')
+const isBatteryMode = computed(() => activeMainMode.value === 'Battery')
+const isBatteryCapacityMode = computed(
+  () => isBatteryMode.value && batterySubMode.value === 'capacity',
+)
+const isBatteryDcrMode = computed(() => isBatteryMode.value && batterySubMode.value === 'dcr')
 const lastPolledLabel = computed(() => (lastPolledAt.value ? lastPolledAt.value.toLocaleTimeString() : 'Never'))
 const loadIsOn = computed(() => (status.value.run & 0x02) !== 0)
 const cpLocked = computed(() => (status.value.run & 0x04) !== 0)
@@ -61,12 +73,23 @@ const basicApplyDisabled = computed(() => {
   if (basicSubMode.value === 'cr') return !(Number.isFinite(crResistanceInput.value) && crResistanceInput.value >= 0)
   return !(Number.isFinite(cpPowerInput.value) && cpPowerInput.value >= 0)
 })
+const capacityAh = computed(() => {
+  if (!isBatteryCapacityMode.value) return 0
+  // CAP setpoint appears to report mAh in firmware frames.
+  return status.value.setpoint / 1000
+})
+const dcrMilliOhms = computed(() => 0)
+const capacityCurrentDisplayMa = computed(() => String(1000).padStart(5, '0'))
 
 const modeValueBySubMode: Record<BasicSubMode, number> = {
   cc: 0x01,
   cv: 0x09,
   cr: 0x11,
   cp: 0x19,
+}
+const batteryModeValueBySubMode: Record<BatterySubMode, number> = {
+  capacity: 0x02,
+  dcr: 0x0a,
 }
 const basicApplyLabel = computed(() => {
   if (basicSubMode.value === 'cc') return 'Apply Current'
@@ -81,7 +104,9 @@ const basicApplyHint = computed(() => {
 
 function syncModeFromStatus(mode: number) {
   syncFromStatus.value = true
-  if (mode === 0x01 || mode === 0x00) {
+  if (mode === 0x00) {
+    activeMainMode.value = null
+  } else if (mode === 0x01) {
     activeMainMode.value = 'Basic'
     basicSubMode.value = 'cc'
   } else if (mode === 0x08 || mode === 0x09) {
@@ -93,8 +118,16 @@ function syncModeFromStatus(mode: number) {
   } else if (mode === 0x18 || mode === 0x19) {
     activeMainMode.value = 'Basic'
     basicSubMode.value = 'cp'
-  } else if (mode === 0x02 || mode === 0x0a) {
+  } else if (mode === 0x02) {
     activeMainMode.value = 'Battery'
+    batterySubMode.value = 'capacity'
+  } else if (mode === 0x0a) {
+    activeMainMode.value = 'Battery'
+    batterySubMode.value = 'dcr'
+  } else if (mode === 0x0b) {
+    activeMainMode.value = 'Power'
+  } else if (mode === 0x04) {
+    activeMainMode.value = 'Advanced'
   }
   queueMicrotask(() => {
     syncFromStatus.value = false
@@ -122,6 +155,8 @@ function padFormatted(value: number, intDigits: number, decimals: number): strin
 }
 
 const setpointLabel = computed(() => {
+  if (isBatteryCapacityMode.value) return 'Capacity'
+  if (isBatteryDcrMode.value) return 'DCR'
   if (activeMainMode.value !== 'Basic') return 'Set Value'
   if (basicSubMode.value === 'cc') return 'Set Current'
   if (basicSubMode.value === 'cv') return 'Set Voltage'
@@ -130,6 +165,8 @@ const setpointLabel = computed(() => {
 })
 
 const setpointDisplayValue = computed(() => {
+  if (isBatteryCapacityMode.value) return capacityAh.value.toFixed(4)
+  if (isBatteryDcrMode.value) return String(Math.round(dcrMilliOhms.value)).padStart(5, '0')
   const value = status.value.setpoint
   if (activeMainMode.value !== 'Basic') return value.toFixed(3)
   if (basicSubMode.value === 'cc') return padFormatted(value, 2, 3)
@@ -139,14 +176,22 @@ const setpointDisplayValue = computed(() => {
 })
 
 const setpointDisplayUnit = computed(() => {
+  if (isBatteryCapacityMode.value) return 'Ah'
+  if (isBatteryDcrMode.value) return 'mOhms'
   if (activeMainMode.value !== 'Basic') return ''
   if (basicSubMode.value === 'cc') return 'A'
   if (basicSubMode.value === 'cv') return 'V'
   if (basicSubMode.value === 'cr') return 'Ohms'
   return 'W'
 })
+const secondaryRightLabel = computed(() => (isBatteryCapacityMode.value ? 'Current' : "Temp('F)"))
+const secondaryRightValue = computed(() =>
+  isBatteryCapacityMode.value
+    ? `${capacityCurrentDisplayMa.value}mA`
+    : fmt(tempF.value, 2),
+)
 
-const modeSwitchToastText = 'Turn output OFF before changing Basic sub modes.'
+const modeSwitchToastText = 'Turn output OFF before changing modes.'
 
 function fmt(value: number, decimals: number): string {
   return value.toFixed(decimals)
@@ -180,7 +225,9 @@ function onSetpointBlur() {
 }
 
 function syncSetpointIntoActiveInput(setpoint: number) {
-  if (basicSubMode.value === 'cc') {
+  if (isBatteryDcrMode.value) {
+    dcrCurrentI2Ma.value = Number((setpoint * 1000).toFixed(0))
+  } else if (basicSubMode.value === 'cc') {
     setCurrentInput.value = Number(setpoint.toFixed(3))
   } else if (basicSubMode.value === 'cv') {
     cvVoltageInput.value = Number(setpoint.toFixed(3))
@@ -192,7 +239,7 @@ function syncSetpointIntoActiveInput(setpoint: number) {
 }
 
 watch(
-  () => [status.value.setpoint, basicSubMode.value] as const,
+  () => [status.value.setpoint, basicSubMode.value, batterySubMode.value, activeMainMode.value] as const,
   ([setpoint]) => {
     if (!currentChanging.value && !editingSetpoint.value) syncSetpointIntoActiveInput(setpoint)
   },
@@ -225,6 +272,42 @@ function onBasicSubModeRequested(next: BasicSubMode | null) {
   basicSubMode.value = next
 }
 
+function modeValueForMainMode(next: MainMode): number {
+  if (next === 'Basic') return modeValueBySubMode[basicSubMode.value]
+  if (next === 'Battery') return batteryModeValueBySubMode[batterySubMode.value]
+  if (next === 'Power') return 0x0b
+  return 0x04
+}
+
+async function onMainModeRequested(next: MainMode) {
+  if (!connected.value || modeChanging.value) return
+  if (next === 'Power' || next === 'Advanced') return
+  if (activeMainMode.value === next) return
+  modeChanging.value = true
+  try {
+    await setMode(modeValueForMainMode(next))
+  } finally {
+    modeChanging.value = false
+  }
+}
+
+async function onBatterySubModeRequested(next: BatterySubMode | null) {
+  if (!next) return
+  if (next === 'dcr') return
+  if (!connected.value || modeChanging.value) return
+  if (loadIsOn.value) {
+    modeSwitchToast.value = true
+    return
+  }
+  if (batterySubMode.value === next && isBatteryMode.value) return
+  modeChanging.value = true
+  try {
+    await setMode(batteryModeValueBySubMode[next])
+  } finally {
+    modeChanging.value = false
+  }
+}
+
 async function applyBasicParameter() {
   if (basicApplyDisabled.value) return
   editingSetpoint.value = false
@@ -238,6 +321,7 @@ async function applyBasicParameter() {
     currentChanging.value = false
   }
 }
+
 </script>
 
 <template>
@@ -316,8 +400,8 @@ async function applyBasicParameter() {
             <div class="small-value">{{ runtimeLabel }}</div>
           </div>
           <div class="tile tile-temp">
-            <div class="label">Temp('F)</div>
-            <div class="small-value">{{ fmt(tempF, 2) }}</div>
+            <div class="label">{{ secondaryRightLabel }}</div>
+            <div class="small-value">{{ secondaryRightValue }}</div>
           </div>
           <div class="tile tile-set">
             <div class="label">{{ setpointLabel }}</div>
@@ -337,121 +421,183 @@ async function applyBasicParameter() {
               size="small"
               :color="activeMainMode === mode ? 'primary' : 'default'"
               variant="flat"
+              :disabled="!connected || modeChanging || mode === 'Power' || mode === 'Advanced'"
+              :prepend-icon="activeMainMode === mode ? 'mdi-check' : undefined"
+              @click="onMainModeRequested(mode)"
             >
               {{ mode }}
             </v-chip>
           </div>
 
-          <div class="text-subtitle-2 mb-2">Basic Sub Modes</div>
-          <div class="d-flex align-center mb-3">
-            <v-btn-toggle
-              :model-value="basicSubMode"
-              @update:model-value="onBasicSubModeRequested"
-              mandatory
-              rounded="pill"
-              density="compact"
-              class="radial-group"
-              :disabled="!connected || !isBasicMode || modeChanging"
-            >
-              <v-btn value="cc">CC</v-btn>
-              <v-btn value="cv">CV</v-btn>
-              <v-btn value="cr">CR</v-btn>
-              <v-btn value="cp">CP</v-btn>
-            </v-btn-toggle>
-            <v-btn
-              size="x-small"
-              variant="text"
-              class="ml-1"
-              :icon="cpLockIcon"
-              :title="`CP ${cpLockText}`"
-              :disabled="!connected || !isBasicMode || basicSubMode !== 'cp' || modeChanging || cpLockChanging"
-              :loading="cpLockChanging"
-              @click="toggleCpLock"
-            />
-          </div>
+          <template v-if="isBasicMode">
+            <div class="text-subtitle-2 mb-2">Basic Sub Modes</div>
+            <div class="d-flex align-center mb-3">
+              <v-btn-toggle
+                :model-value="basicSubMode"
+                @update:model-value="onBasicSubModeRequested"
+                mandatory
+                rounded="pill"
+                density="compact"
+                class="radial-group"
+                :disabled="!connected || !isBasicMode || modeChanging"
+              >
+                <v-btn value="cc">CC</v-btn>
+                <v-btn value="cv">CV</v-btn>
+                <v-btn value="cr">CR</v-btn>
+                <v-btn value="cp">CP</v-btn>
+              </v-btn-toggle>
+              <v-btn
+                size="x-small"
+                variant="text"
+                class="ml-1"
+                :icon="cpLockIcon"
+                :title="`CP ${cpLockText}`"
+                :disabled="!connected || !isBasicMode || basicSubMode !== 'cp' || modeChanging || cpLockChanging"
+                :loading="cpLockChanging"
+                @click="toggleCpLock"
+              />
+            </div>
 
-          <div class="text-subtitle-2 mb-2">
-            <template v-if="basicSubMode === 'cc'">Set Current (A)</template>
-            <template v-else-if="basicSubMode === 'cv'">Set Voltage (V)</template>
-            <template v-else-if="basicSubMode === 'cr'">Set Resistance (Ohms)</template>
-            <template v-else>Set Power (W)</template>
-          </div>
-          <v-text-field
-            v-if="basicSubMode === 'cc'"
-            v-model.number="setCurrentInput"
-            type="number"
-            min="0"
-            step="0.001"
-            density="compact"
-            hide-details
-            suffix="A"
-            class="mb-2"
-            :disabled="!connected || !isBasicMode || currentChanging"
-            @focus="onSetpointFocus"
-            @blur="onSetpointBlur"
-            @keydown.enter.prevent="applyBasicParameter"
-          />
-          <v-text-field
-            v-else-if="basicSubMode === 'cv'"
-            v-model.number="cvVoltageInput"
-            type="number"
-            min="0"
-            step="0.001"
-            density="compact"
-            hide-details
-            suffix="V"
-            class="mb-2"
-            :disabled="!connected || !isBasicMode || currentChanging"
-            @focus="onSetpointFocus"
-            @blur="onSetpointBlur"
-            @keydown.enter.prevent="applyBasicParameter"
-          />
-          <v-text-field
-            v-else-if="basicSubMode === 'cr'"
-            v-model.number="crResistanceInput"
-            type="number"
-            min="0"
-            step="0.1"
-            density="compact"
-            hide-details
-            suffix="Ohms"
-            class="mb-2"
-            :disabled="!connected || !isBasicMode || currentChanging"
-            @focus="onSetpointFocus"
-            @blur="onSetpointBlur"
-            @keydown.enter.prevent="applyBasicParameter"
-          />
-          <v-text-field
-            v-else
-            v-model.number="cpPowerInput"
-            type="number"
-            min="0"
-            step="0.01"
-            density="compact"
-            hide-details
-            suffix="W"
-            class="mb-2"
-            :disabled="!connected || !isBasicMode || currentChanging"
-            @focus="onSetpointFocus"
-            @blur="onSetpointBlur"
-            @keydown.enter.prevent="applyBasicParameter"
-          />
-          <div class="text-caption text-disabled mb-2">
-            <template v-if="basicSubMode === 'cv'">Target format: 05.000V</template>
-            <template v-else-if="basicSubMode === 'cr'">Target format: 0010.0Ohms</template>
-            <template v-else-if="basicSubMode === 'cp'">Target format: 010.00W</template>
-          </div>
-          <v-btn
-            block
-            color="primary"
-            :loading="currentChanging"
-            :disabled="basicApplyDisabled"
-            @click="applyBasicParameter"
-          >
-            {{ basicApplyLabel }}
-          </v-btn>
-          <div v-if="basicApplyHint" class="text-caption text-disabled mt-2">
-            {{ basicApplyHint }}
+            <div class="text-subtitle-2 mb-2">
+              <template v-if="basicSubMode === 'cc'">Set Current (A)</template>
+              <template v-else-if="basicSubMode === 'cv'">Set Voltage (V)</template>
+              <template v-else-if="basicSubMode === 'cr'">Set Resistance (Ohms)</template>
+              <template v-else>Set Power (W)</template>
+            </div>
+            <v-text-field
+              v-if="basicSubMode === 'cc'"
+              v-model.number="setCurrentInput"
+              type="number"
+              min="0"
+              step="0.001"
+              density="compact"
+              hide-details
+              suffix="A"
+              class="mb-2"
+              :disabled="!connected || !isBasicMode || currentChanging"
+              @focus="onSetpointFocus"
+              @blur="onSetpointBlur"
+              @keydown.enter.prevent="applyBasicParameter"
+            />
+            <v-text-field
+              v-else-if="basicSubMode === 'cv'"
+              v-model.number="cvVoltageInput"
+              type="number"
+              min="0"
+              step="0.001"
+              density="compact"
+              hide-details
+              suffix="V"
+              class="mb-2"
+              :disabled="!connected || !isBasicMode || currentChanging"
+              @focus="onSetpointFocus"
+              @blur="onSetpointBlur"
+              @keydown.enter.prevent="applyBasicParameter"
+            />
+            <v-text-field
+              v-else-if="basicSubMode === 'cr'"
+              v-model.number="crResistanceInput"
+              type="number"
+              min="0"
+              step="0.1"
+              density="compact"
+              hide-details
+              suffix="Ohms"
+              class="mb-2"
+              :disabled="!connected || !isBasicMode || currentChanging"
+              @focus="onSetpointFocus"
+              @blur="onSetpointBlur"
+              @keydown.enter.prevent="applyBasicParameter"
+            />
+            <v-text-field
+              v-else
+              v-model.number="cpPowerInput"
+              type="number"
+              min="0"
+              step="0.01"
+              density="compact"
+              hide-details
+              suffix="W"
+              class="mb-2"
+              :disabled="!connected || !isBasicMode || currentChanging"
+              @focus="onSetpointFocus"
+              @blur="onSetpointBlur"
+              @keydown.enter.prevent="applyBasicParameter"
+            />
+            <div class="text-caption text-disabled mb-2">
+              <template v-if="basicSubMode === 'cv'">Target format: 05.000V</template>
+              <template v-else-if="basicSubMode === 'cr'">Target format: 0010.0Ohms</template>
+              <template v-else-if="basicSubMode === 'cp'">Target format: 010.00W</template>
+            </div>
+            <v-btn
+              block
+              color="primary"
+              :loading="currentChanging"
+              :disabled="basicApplyDisabled"
+              @click="applyBasicParameter"
+            >
+              {{ basicApplyLabel }}
+            </v-btn>
+            <div v-if="basicApplyHint" class="text-caption text-disabled mt-2">
+              {{ basicApplyHint }}
+            </div>
+          </template>
+
+          <template v-else-if="isBatteryMode">
+            <div class="text-subtitle-2 mb-2">Battery Sub Modes</div>
+            <div class="d-flex align-center mb-3">
+              <v-btn-toggle
+                :model-value="batterySubMode"
+                mandatory
+                rounded="pill"
+                density="compact"
+                class="radial-group"
+                :disabled="!connected || modeChanging"
+                @update:model-value="onBatterySubModeRequested"
+              >
+                <v-btn value="capacity">CAP</v-btn>
+                <v-btn value="dcr" disabled>DCR</v-btn>
+              </v-btn-toggle>
+            </div>
+
+            <template v-if="isBatteryCapacityMode">
+              <div class="text-caption text-disabled">
+                CAP current is fixed by device input only.
+              </div>
+            </template>
+
+            <template v-else>
+              <div class="text-subtitle-2 mb-2">Current I1 (mA)</div>
+              <v-text-field
+                :model-value="dcrCurrentI1Ma"
+                density="compact"
+                hide-details
+                suffix="mA"
+                class="mb-2"
+                readonly
+              />
+              <div class="text-subtitle-2 mb-2">Current I2 (mA)</div>
+              <v-text-field
+                :model-value="dcrCurrentI2Ma"
+                density="compact"
+                hide-details
+                suffix="mA"
+                class="mb-2"
+                readonly
+              />
+              <div class="text-subtitle-2 mb-2">DCR (mOhms)</div>
+              <v-text-field
+                :model-value="String(Math.round(dcrMilliOhms)).padStart(5, '0')"
+                density="compact"
+                hide-details
+                suffix="mOhms"
+                readonly
+              />
+            </template>
+          </template>
+
+          <div v-else class="text-caption text-disabled">
+            Select a mode from poll data or click a Main Mode chip.
           </div>
         </v-card>
 
