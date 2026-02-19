@@ -115,8 +115,42 @@ async function setCurrent(currentA: number) {
   }
 }
 
+async function setBasicSetpoint(value: number) {
+  if (!service) return
+  error.value = null
+  try {
+    await service.setBasicSetpoint(value)
+    await service.requestStatus()
+    lastPolledAt.value = new Date()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+    throw err
+  }
+}
+
+async function setMode(modeValue: number) {
+  if (!service) return
+  error.value = null
+  try {
+    await service.setMode(modeValue)
+    await service.requestStatus()
+    lastPolledAt.value = new Date()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+    throw err
+  }
+}
+
 function startPolling(intervalMs: number = 1000) {
   stopPolling()
+  if (connected.value && service) {
+    service
+      .requestStatus()
+      .then(() => {
+        lastPolledAt.value = new Date()
+      })
+      .catch(() => {})
+  }
   pollTimer = setInterval(() => {
     if (!connected.value || !service) return
     service
@@ -145,6 +179,8 @@ export function useAlientekModeOne() {
     refreshStatus,
     setLoad,
     setCurrent,
+    setBasicSetpoint,
+    setMode,
     startPolling,
     stopPolling,
   }

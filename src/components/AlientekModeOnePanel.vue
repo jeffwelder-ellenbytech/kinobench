@@ -2,13 +2,27 @@
 import { computed, ref, watch } from 'vue'
 import { useAlientekModeOne } from '../composables/useAlientekModeOne'
 
-const { connected, status, refreshStatus, setLoad, setCurrent, startPolling, stopPolling, lastPolledAt, disconnect } = useAlientekModeOne()
+const { connected, status, refreshStatus, setLoad, setCurrent, setBasicSetpoint, setMode, startPolling, stopPolling, lastPolledAt, disconnect } = useAlientekModeOne()
+
+type MainMode = 'Basic' | 'Battery' | 'Power' | 'Advanced'
+type BasicSubMode = 'cc' | 'cv' | 'cr' | 'cp'
 
 const autoRefresh = ref(true)
 const pollInterval = ref(1000)
 const loadChanging = ref(false)
 const currentChanging = ref(false)
+const modeChanging = ref(false)
+const editingSetpoint = ref(false)
+const modeSwitchToast = ref(false)
 const setCurrentInput = ref(2)
+const cvVoltageInput = ref(5.0)
+const crResistanceInput = ref(10.0)
+const cpPowerInput = ref(10.0)
+const activeMainMode = ref<MainMode>('Basic')
+const basicSubMode = ref<BasicSubMode>('cc')
+const syncFromStatus = ref(false)
+
+const mainModes: MainMode[] = ['Basic', 'Battery', 'Power', 'Advanced']
 
 watch(autoRefresh, (enabled) => {
   if (enabled && connected.value) startPolling(pollInterval.value)
@@ -24,26 +38,64 @@ const power = computed(() => status.value.power)
 const tempF = computed(() => status.value.tempF)
 const runtimeLabel = computed(() => status.value.runTimeLabel)
 const modeLabel = computed(() => {
-  const mode = status.value.mode
-  if (mode === 0x00) return 'IDLE'
-  if (mode === 0x01) return 'CC'
-  if (mode === 0x09) return 'CV'
-  if (mode === 0x02) return 'CAP'
-  if (mode === 0x0a) return 'DCR'
-  if (mode === 0x11) return 'CR'
-  if (mode === 0x19) return 'CP'
-  return `M${mode}`
+  if (activeMainMode.value !== 'Basic') return activeMainMode.value.toUpperCase()
+  if (basicSubMode.value === 'cc') return 'CC'
+  if (basicSubMode.value === 'cv') return 'CV'
+  if (basicSubMode.value === 'cr') return 'CR'
+  if (basicSubMode.value === 'cp') return 'CP'
+  return `M${status.value.mode}`
 })
-const profileLabel = computed(() => {
-  const mode = status.value.mode
-  if (mode === 0x02 || mode === 0x0a) return 'Battery'
-  if (mode === 0x00) return 'Standby'
-  return 'Basic'
-})
-const isBasicMode = computed(() => profileLabel.value === 'Basic')
+const profileLabel = computed(() => activeMainMode.value)
+const isBasicMode = computed(() => activeMainMode.value === 'Basic')
 const lastPolledLabel = computed(() => (lastPolledAt.value ? lastPolledAt.value.toLocaleTimeString() : 'Never'))
 const loadIsOn = computed(() => status.value.run !== 0)
 const currentInputValid = computed(() => Number.isFinite(setCurrentInput.value) && setCurrentInput.value >= 0)
+const basicApplyDisabled = computed(() => {
+  if (!connected.value || !isBasicMode.value || currentChanging.value) return true
+  if (basicSubMode.value === 'cc') return !currentInputValid.value
+  if (basicSubMode.value === 'cv') return !(Number.isFinite(cvVoltageInput.value) && cvVoltageInput.value >= 0)
+  if (basicSubMode.value === 'cr') return !(Number.isFinite(crResistanceInput.value) && crResistanceInput.value >= 0)
+  return !(Number.isFinite(cpPowerInput.value) && cpPowerInput.value >= 0)
+})
+
+const modeValueBySubMode: Record<BasicSubMode, number> = {
+  cc: 0x01,
+  cv: 0x09,
+  cr: 0x11,
+  cp: 0x19,
+}
+const basicApplyLabel = computed(() => {
+  if (basicSubMode.value === 'cc') return 'Apply Current'
+  if (basicSubMode.value === 'cv') return 'Apply Voltage'
+  if (basicSubMode.value === 'cr') return 'Apply Resistance'
+  return 'Apply Power'
+})
+const basicApplyHint = computed(() => {
+  if (!isBasicMode.value) return 'Sub-mode controls are enabled in Basic mode.'
+  return ''
+})
+
+function syncModeFromStatus(mode: number) {
+  syncFromStatus.value = true
+  if (mode === 0x01 || mode === 0x00) {
+    activeMainMode.value = 'Basic'
+    basicSubMode.value = 'cc'
+  } else if (mode === 0x08 || mode === 0x09) {
+    activeMainMode.value = 'Basic'
+    basicSubMode.value = 'cv'
+  } else if (mode === 0x10 || mode === 0x11) {
+    activeMainMode.value = 'Basic'
+    basicSubMode.value = 'cr'
+  } else if (mode === 0x18 || mode === 0x19) {
+    activeMainMode.value = 'Basic'
+    basicSubMode.value = 'cp'
+  } else if (mode === 0x02 || mode === 0x0a) {
+    activeMainMode.value = 'Battery'
+  }
+  queueMicrotask(() => {
+    syncFromStatus.value = false
+  })
+}
 
 function splitDisplayValue(value: number, decimals: number = 5): { main: string; tail: string } {
   const fixed = value.toFixed(decimals)
@@ -56,6 +108,41 @@ function splitDisplayValue(value: number, decimals: number = 5): { main: string;
 const voltageDisplay = computed(() => splitDisplayValue(status.value.voltage, 5))
 const currentDisplay = computed(() => splitDisplayValue(status.value.current, 5))
 const powerDisplay = computed(() => splitDisplayValue(power.value, 5))
+
+function padFormatted(value: number, intDigits: number, decimals: number): string {
+  const safe = Number.isFinite(value) ? Math.max(0, value) : 0
+  const fixed = safe.toFixed(decimals)
+  const [intPart, fracPart] = fixed.split('.')
+  const paddedInt = (intPart ?? '0').padStart(intDigits, '0')
+  return fracPart !== undefined ? `${paddedInt}.${fracPart}` : paddedInt
+}
+
+const setpointLabel = computed(() => {
+  if (activeMainMode.value !== 'Basic') return 'Set Value'
+  if (basicSubMode.value === 'cc') return 'Set Current'
+  if (basicSubMode.value === 'cv') return 'Set Voltage'
+  if (basicSubMode.value === 'cr') return 'Set Res'
+  return 'Set Power'
+})
+
+const setpointDisplayValue = computed(() => {
+  const value = status.value.setpoint
+  if (activeMainMode.value !== 'Basic') return value.toFixed(3)
+  if (basicSubMode.value === 'cc') return padFormatted(value, 2, 3)
+  if (basicSubMode.value === 'cv') return padFormatted(value, 2, 3)
+  if (basicSubMode.value === 'cr') return padFormatted(value, 3, 1)
+  return padFormatted(value, 3, 2)
+})
+
+const setpointDisplayUnit = computed(() => {
+  if (activeMainMode.value !== 'Basic') return ''
+  if (basicSubMode.value === 'cc') return 'A'
+  if (basicSubMode.value === 'cv') return 'V'
+  if (basicSubMode.value === 'cr') return 'Ohms'
+  return 'W'
+})
+
+const modeSwitchToastText = 'Turn output OFF before changing Basic sub modes.'
 
 function fmt(value: number, decimals: number): string {
   return value.toFixed(decimals)
@@ -70,18 +157,69 @@ async function toggleLoad() {
   }
 }
 
+function onSetpointFocus() {
+  editingSetpoint.value = true
+}
+
+function onSetpointBlur() {
+  editingSetpoint.value = false
+}
+
+function syncSetpointIntoActiveInput(setpoint: number) {
+  if (basicSubMode.value === 'cc') {
+    setCurrentInput.value = Number(setpoint.toFixed(3))
+  } else if (basicSubMode.value === 'cv') {
+    cvVoltageInput.value = Number(setpoint.toFixed(3))
+  } else if (basicSubMode.value === 'cr') {
+    crResistanceInput.value = Number(setpoint.toFixed(1))
+  } else if (basicSubMode.value === 'cp') {
+    cpPowerInput.value = Number(setpoint.toFixed(2))
+  }
+}
+
 watch(
-  () => status.value.setpoint,
-  (setpoint) => {
-    if (!currentChanging.value) setCurrentInput.value = Number(setpoint.toFixed(3))
+  () => [status.value.setpoint, basicSubMode.value] as const,
+  ([setpoint]) => {
+    if (!currentChanging.value && !editingSetpoint.value) syncSetpointIntoActiveInput(setpoint)
   },
+  { immediate: true },
+)
+watch(
+  () => status.value.mode,
+  (mode) => syncModeFromStatus(mode),
+  { immediate: true },
 )
 
-async function applySetCurrent() {
-  if (!currentInputValid.value) return
+watch(basicSubMode, async (next) => {
+  if (!connected.value || !isBasicMode.value || syncFromStatus.value || modeChanging.value) return
+  const targetMode = modeValueBySubMode[next]
+  if (status.value.mode === targetMode) return
+  modeChanging.value = true
+  try {
+    await setMode(targetMode)
+  } finally {
+    modeChanging.value = false
+  }
+})
+
+function onBasicSubModeRequested(next: BasicSubMode | null) {
+  if (!next || next === basicSubMode.value) return
+  if (loadIsOn.value) {
+    modeSwitchToast.value = true
+    return
+  }
+  basicSubMode.value = next
+}
+
+async function applyBasicParameter() {
+  if (basicApplyDisabled.value) return
+  editingSetpoint.value = false
   currentChanging.value = true
   try {
-    await setCurrent(setCurrentInput.value)
+    if (basicSubMode.value === 'cc') await setCurrent(setCurrentInput.value)
+    else if (basicSubMode.value === 'cv') await setBasicSetpoint(cvVoltageInput.value)
+    else if (basicSubMode.value === 'cr') await setBasicSetpoint(crResistanceInput.value)
+    else if (basicSubMode.value === 'cp') await setBasicSetpoint(cpPowerInput.value)
   } finally {
     currentChanging.value = false
   }
@@ -91,9 +229,11 @@ async function applySetCurrent() {
 <template>
   <v-card class="mode-one-wrap pa-4">
     <div class="d-flex align-center mb-3">
-      <div class="text-subtitle-1 font-weight-bold">EL15 Measurement Interface</div>
+      <div class="d-flex flex-column">
+        <div class="text-subtitle-1 font-weight-bold">EL15 Measurement Interface</div>
+        <div class="text-caption text-disabled">Last live poll: {{ lastPolledLabel }}</div>
+      </div>
       <v-spacer />
-      <div class="text-caption text-disabled mr-3">Last polled: {{ lastPolledLabel }}</div>
       <v-switch
         v-model="autoRefresh"
         hide-details
@@ -124,10 +264,15 @@ async function applySetCurrent() {
     </v-alert>
 
     <div class="display-layout">
-      <div class="measurement-display" :class="{ 'opacity-50': !connected }">
+      <div>
+        <div class="measurement-display" :class="{ 'opacity-50': !connected }">
         <div class="topbar">
           <div class="status-left">{{ status.run ? 'ON' : 'OFF' }}</div>
-          <div class="status-fan">{{ status.fan ? '✻' : '-' }}</div>
+          <div class="status-fan">
+            <v-icon v-if="status.fan" icon="mdi-fan" size="22" />
+            <span v-else>-</span>
+            <v-icon icon="mdi-bluetooth" size="24" class="ml-1" />
+          </div>
           <div class="status-profile">{{ profileLabel }}</div>
           <div class="status-lock">🔓</div>
           <div class="status-mode">{{ modeLabel }}</div>
@@ -159,16 +304,52 @@ async function applySetCurrent() {
             <div class="small-value">{{ fmt(tempF, 2) }}</div>
           </div>
           <div class="tile tile-set">
-            <div class="label">Set Current</div>
-            <div class="small-value">{{ fmt(status.setpoint, 3) }} A</div>
+            <div class="label">{{ setpointLabel }}</div>
+            <div class="small-value">{{ setpointDisplayValue }} {{ setpointDisplayUnit }}</div>
           </div>
         </div>
+      </div>
       </div>
 
       <div class="side-controls">
         <v-card variant="outlined" class="pa-3 mb-3">
-          <div class="text-subtitle-2 mb-2">Set Current (Basic)</div>
+          <div class="text-subtitle-2 mb-2">Main Modes</div>
+          <div class="main-mode-list mb-3">
+            <v-chip
+              v-for="mode in mainModes"
+              :key="mode"
+              size="small"
+              :color="activeMainMode === mode ? 'primary' : 'default'"
+              variant="flat"
+            >
+              {{ mode }}
+            </v-chip>
+          </div>
+
+          <div class="text-subtitle-2 mb-2">Basic Sub Modes</div>
+          <v-btn-toggle
+            :model-value="basicSubMode"
+            @update:model-value="onBasicSubModeRequested"
+            mandatory
+            rounded="pill"
+            density="compact"
+            class="mb-3 radial-group"
+            :disabled="!connected || !isBasicMode || modeChanging"
+          >
+            <v-btn value="cc">CC</v-btn>
+            <v-btn value="cv">CV</v-btn>
+            <v-btn value="cr">CR</v-btn>
+            <v-btn value="cp">CP</v-btn>
+          </v-btn-toggle>
+
+          <div class="text-subtitle-2 mb-2">
+            <template v-if="basicSubMode === 'cc'">Set Current (A)</template>
+            <template v-else-if="basicSubMode === 'cv'">Set Voltage (V)</template>
+            <template v-else-if="basicSubMode === 'cr'">Set Resistance (Ohms)</template>
+            <template v-else>Set Power (W)</template>
+          </div>
           <v-text-field
+            v-if="basicSubMode === 'cc'"
             v-model.number="setCurrentInput"
             type="number"
             min="0"
@@ -178,18 +359,71 @@ async function applySetCurrent() {
             suffix="A"
             class="mb-2"
             :disabled="!connected || !isBasicMode || currentChanging"
+            @focus="onSetpointFocus"
+            @blur="onSetpointBlur"
+            @keydown.enter.prevent="applyBasicParameter"
           />
+          <v-text-field
+            v-else-if="basicSubMode === 'cv'"
+            v-model.number="cvVoltageInput"
+            type="number"
+            min="0"
+            step="0.001"
+            density="compact"
+            hide-details
+            suffix="V"
+            class="mb-2"
+            :disabled="!connected || !isBasicMode || currentChanging"
+            @focus="onSetpointFocus"
+            @blur="onSetpointBlur"
+            @keydown.enter.prevent="applyBasicParameter"
+          />
+          <v-text-field
+            v-else-if="basicSubMode === 'cr'"
+            v-model.number="crResistanceInput"
+            type="number"
+            min="0"
+            step="0.1"
+            density="compact"
+            hide-details
+            suffix="Ohms"
+            class="mb-2"
+            :disabled="!connected || !isBasicMode || currentChanging"
+            @focus="onSetpointFocus"
+            @blur="onSetpointBlur"
+            @keydown.enter.prevent="applyBasicParameter"
+          />
+          <v-text-field
+            v-else
+            v-model.number="cpPowerInput"
+            type="number"
+            min="0"
+            step="0.01"
+            density="compact"
+            hide-details
+            suffix="W"
+            class="mb-2"
+            :disabled="!connected || !isBasicMode || currentChanging"
+            @focus="onSetpointFocus"
+            @blur="onSetpointBlur"
+            @keydown.enter.prevent="applyBasicParameter"
+          />
+          <div class="text-caption text-disabled mb-2">
+            <template v-if="basicSubMode === 'cv'">Target format: 05.000V</template>
+            <template v-else-if="basicSubMode === 'cr'">Target format: 0010.0Ohms</template>
+            <template v-else-if="basicSubMode === 'cp'">Target format: 010.00W</template>
+          </div>
           <v-btn
             block
             color="primary"
             :loading="currentChanging"
-            :disabled="!connected || !isBasicMode || !currentInputValid"
-            @click="applySetCurrent"
+            :disabled="basicApplyDisabled"
+            @click="applyBasicParameter"
           >
-            Apply Current
+            {{ basicApplyLabel }}
           </v-btn>
-          <div v-if="!isBasicMode" class="text-caption text-disabled mt-2">
-            Current setpoint write is enabled in Basic modes.
+          <div v-if="basicApplyHint" class="text-caption text-disabled mt-2">
+            {{ basicApplyHint }}
           </div>
         </v-card>
 
@@ -206,6 +440,9 @@ async function applySetCurrent() {
         </v-btn>
       </div>
     </div>
+    <v-snackbar v-model="modeSwitchToast" timeout="1800" color="warning">
+      {{ modeSwitchToastText }}
+    </v-snackbar>
   </v-card>
 </template>
 
@@ -216,7 +453,7 @@ async function applySetCurrent() {
 
 .display-layout {
   display: inline-grid;
-  grid-template-columns: minmax(0, 760px) 250px;
+  grid-template-columns: minmax(0, 760px) 300px;
   gap: 14px;
   align-items: start;
   justify-content: start;
@@ -237,6 +474,17 @@ async function applySetCurrent() {
 .side-controls {
   display: flex;
   flex-direction: column;
+  min-width: 300px;
+}
+
+.main-mode-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.radial-group :deep(.v-btn) {
+  min-width: 54px;
 }
 
 .topbar {

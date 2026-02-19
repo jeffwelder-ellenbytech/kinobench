@@ -29,7 +29,7 @@ const activeTab = ref('alientek')
           <v-tab value="buspirate" prepend-icon="mdi-usb">Bus Pirate</v-tab>
           <v-tab value="anker" prepend-icon="mdi-battery">Anker Powerbank</v-tab>
           <v-tab value="anker-charger" prepend-icon="mdi-flash">Anker Charger</v-tab>
-          <v-tab value="alientek" prepend-icon="mdi-gauge">Alientek EL15</v-tab>
+          <v-tab value="alientek" prepend-icon="mdi-resistor-nodes">Alientek EL15</v-tab>
         </v-tabs>
 
         <v-tabs-window v-model="activeTab">

@@ -98,8 +98,9 @@ function decodeStatusPacket(packet: Uint8Array): AlientekStatus {
     runTimeLabel: formatRunTime(runTimeSeconds),
     unk1: frame[4] ?? 0,
     run: frame[6] ?? 0,
-    mode: (frame[5] ?? 0) & 0x0f,
-    fan: (frame[5] ?? 0) >> 4,
+    // Byte 5 packs mode with a fan flag in bit7 (e.g. 0x01 -> 0x81 when fan turns on).
+    mode: (frame[5] ?? 0) & 0x7f,
+    fan: ((frame[5] ?? 0) & 0x80) !== 0 ? 1 : 0,
     crcOk: isCrcValid(frame),
     rawHex: bytesToHex(frame),
   }
@@ -203,16 +204,28 @@ export class AlientekBleService {
   }
 
   async setCurrent(currentA: number): Promise<void> {
-    if (!Number.isFinite(currentA) || currentA < 0) {
-      throw new Error('Current must be a non-negative number.')
+    await this.setBasicSetpoint(currentA)
+  }
+
+  async setBasicSetpoint(value: number): Promise<void> {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error('Setpoint must be a non-negative number.')
     }
     // AF 07 03 04 04 [float32 LE] [CRC]
     const floatBuffer = new ArrayBuffer(4)
-    new DataView(floatBuffer).setFloat32(0, currentA, true)
+    new DataView(floatBuffer).setFloat32(0, value, true)
     const payload = new Uint8Array(9)
     payload.set([0xaf, 0x07, 0x03, 0x04, 0x04], 0)
     payload.set(new Uint8Array(floatBuffer), 5)
     await this.sendCommand(payload)
+  }
+
+  async setMode(modeValue: number): Promise<void> {
+    if (!Number.isInteger(modeValue) || modeValue < 0 || modeValue > 0xff) {
+      throw new Error('Mode value must be a byte (0-255).')
+    }
+    // AF 07 03 03 01 [mode]
+    await this.sendCommand(new Uint8Array([0xaf, 0x07, 0x03, 0x03, 0x01, modeValue & 0xff]))
   }
 
   async sendCommand(commandWithoutCrc: Uint8Array): Promise<void> {
