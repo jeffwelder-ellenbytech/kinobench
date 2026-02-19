@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import ConnectionPanel from './components/ConnectionPanel.vue'
 import I2CPanel from './components/I2CPanel.vue'
 import LEDPanel from './components/LEDPanel.vue'
@@ -10,14 +10,18 @@ import AnkerChargerConnectionPanel from './components/AnkerChargerConnectionPane
 import AnkerChargerPowerPanel from './components/AnkerChargerPowerPanel.vue'
 import AlientekConnectionPanel from './components/AlientekConnectionPanel.vue'
 import AlientekEl15Panel from './components/AlientekEl15Panel.vue'
+import DP100TabPanel from './components/dp100/DP100TabPanel.vue'
 import { useAnkerBattery } from './composables/useAnkerBattery'
 import { useAnkerCharger } from './composables/useAnkerCharger'
 import { useAlientekModeOne } from './composables/useAlientekModeOne'
+import { useDP100WebHID } from './composables/dp100/useDP100WebHID'
 
 const activeTab = ref('alientek')
 const { connected: ankerConnected } = useAnkerBattery()
 const { connected: ankerChargerConnected } = useAnkerCharger()
 const { connected: alientekConnected } = useAlientekModeOne()
+const { device: dp100Device } = useDP100WebHID()
+const dp100Connected = computed(() => Boolean(dp100Device.value))
 </script>
 
 <template>
@@ -50,6 +54,10 @@ const { connected: alientekConnected } = useAlientekModeOne()
           <v-tab value="alientek" prepend-icon="mdi-resistor-nodes">
             Alientek EL15
             <v-icon v-if="alientekConnected" icon="mdi-bluetooth" size="16" color="blue" class="ml-1" />
+          </v-tab>
+          <v-tab value="dp100" prepend-icon="mdi-power-plug">
+            DP100
+            <v-icon v-if="dp100Connected" icon="mdi-usb" size="16" color="blue" class="ml-1" />
           </v-tab>
         </v-tabs>
 
@@ -98,6 +106,10 @@ const { connected: alientekConnected } = useAlientekModeOne()
                 <AlientekEl15Panel />
               </v-col>
             </v-row>
+          </v-tabs-window-item>
+
+          <v-tabs-window-item value="dp100" eager>
+            <DP100TabPanel />
           </v-tabs-window-item>
         </v-tabs-window>
       </v-container>
