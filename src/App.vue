@@ -31,6 +31,70 @@ const dp100Connected = computed(() => Boolean(dp100Device.value))
         <span class="font-weight-bold">KinoBench</span>
         <span class="text-caption text-disabled ml-2">Hardware Workbench</span>
       </v-app-bar-title>
+      <div class="app-bar-flag" aria-label="American flag" role="img">
+        <svg viewBox="0 0 190 100" xmlns="http://www.w3.org/2000/svg">
+          <rect width="190" height="100" fill="#b22234" />
+          <rect y="7.69" width="190" height="7.69" fill="#fff" />
+          <rect y="23.08" width="190" height="7.69" fill="#fff" />
+          <rect y="38.46" width="190" height="7.69" fill="#fff" />
+          <rect y="53.85" width="190" height="7.69" fill="#fff" />
+          <rect y="69.23" width="190" height="7.69" fill="#fff" />
+          <rect y="84.62" width="190" height="7.69" fill="#fff" />
+          <rect width="76" height="53.85" fill="#3c3b6e" />
+          <g fill="#fff">
+            <circle cx="6.3" cy="5.4" r="1.6" />
+            <circle cx="18.9" cy="5.4" r="1.6" />
+            <circle cx="31.5" cy="5.4" r="1.6" />
+            <circle cx="44.1" cy="5.4" r="1.6" />
+            <circle cx="56.7" cy="5.4" r="1.6" />
+            <circle cx="69.3" cy="5.4" r="1.6" />
+            <circle cx="12.6" cy="10.8" r="1.6" />
+            <circle cx="25.2" cy="10.8" r="1.6" />
+            <circle cx="37.8" cy="10.8" r="1.6" />
+            <circle cx="50.4" cy="10.8" r="1.6" />
+            <circle cx="63.0" cy="10.8" r="1.6" />
+            <circle cx="6.3" cy="16.2" r="1.6" />
+            <circle cx="18.9" cy="16.2" r="1.6" />
+            <circle cx="31.5" cy="16.2" r="1.6" />
+            <circle cx="44.1" cy="16.2" r="1.6" />
+            <circle cx="56.7" cy="16.2" r="1.6" />
+            <circle cx="69.3" cy="16.2" r="1.6" />
+            <circle cx="12.6" cy="21.6" r="1.6" />
+            <circle cx="25.2" cy="21.6" r="1.6" />
+            <circle cx="37.8" cy="21.6" r="1.6" />
+            <circle cx="50.4" cy="21.6" r="1.6" />
+            <circle cx="63.0" cy="21.6" r="1.6" />
+            <circle cx="6.3" cy="27.0" r="1.6" />
+            <circle cx="18.9" cy="27.0" r="1.6" />
+            <circle cx="31.5" cy="27.0" r="1.6" />
+            <circle cx="44.1" cy="27.0" r="1.6" />
+            <circle cx="56.7" cy="27.0" r="1.6" />
+            <circle cx="69.3" cy="27.0" r="1.6" />
+            <circle cx="12.6" cy="32.4" r="1.6" />
+            <circle cx="25.2" cy="32.4" r="1.6" />
+            <circle cx="37.8" cy="32.4" r="1.6" />
+            <circle cx="50.4" cy="32.4" r="1.6" />
+            <circle cx="63.0" cy="32.4" r="1.6" />
+            <circle cx="6.3" cy="37.8" r="1.6" />
+            <circle cx="18.9" cy="37.8" r="1.6" />
+            <circle cx="31.5" cy="37.8" r="1.6" />
+            <circle cx="44.1" cy="37.8" r="1.6" />
+            <circle cx="56.7" cy="37.8" r="1.6" />
+            <circle cx="69.3" cy="37.8" r="1.6" />
+            <circle cx="12.6" cy="43.2" r="1.6" />
+            <circle cx="25.2" cy="43.2" r="1.6" />
+            <circle cx="37.8" cy="43.2" r="1.6" />
+            <circle cx="50.4" cy="43.2" r="1.6" />
+            <circle cx="63.0" cy="43.2" r="1.6" />
+            <circle cx="6.3" cy="48.6" r="1.6" />
+            <circle cx="18.9" cy="48.6" r="1.6" />
+            <circle cx="31.5" cy="48.6" r="1.6" />
+            <circle cx="44.1" cy="48.6" r="1.6" />
+            <circle cx="56.7" cy="48.6" r="1.6" />
+            <circle cx="69.3" cy="48.6" r="1.6" />
+          </g>
+        </svg>
+      </div>
     </v-app-bar>
 
     <v-main>
@@ -116,3 +180,19 @@ const dp100Connected = computed(() => Boolean(dp100Device.value))
     </v-main>
   </v-app>
 </template>
+
+<style scoped>
+.app-bar-flag {
+  width: 40px;
+  height: 30px;
+  margin-right: 12px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.app-bar-flag svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+</style>
