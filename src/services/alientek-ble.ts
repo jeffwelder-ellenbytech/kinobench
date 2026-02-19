@@ -198,9 +198,15 @@ export class AlientekBleService {
   }
 
   async setLoad(enabled: boolean): Promise<void> {
-    // AF 07 03 09 01 00 = load off
-    // AF 07 03 09 01 04 = load on
+    // AF 07 03 09 01 00 = output off
+    // AF 07 03 09 01 04 = output on
     await this.sendCommand(new Uint8Array([0xaf, 0x07, 0x03, 0x09, 0x01, enabled ? 0x04 : 0x00]))
+  }
+
+  async setLock(locked: boolean): Promise<void> {
+    // AF 07 03 09 01 00 = unlock
+    // AF 07 03 09 01 01 = lock
+    await this.sendCommand(new Uint8Array([0xaf, 0x07, 0x03, 0x09, 0x01, locked ? 0x01 : 0x00]))
   }
 
   async setCurrent(currentA: number): Promise<void> {

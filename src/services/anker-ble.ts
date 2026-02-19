@@ -405,10 +405,10 @@ export class AnkerBleService {
   // Controls noisy per-packet logs; default is intentionally quiet.
   private trafficLogging: 'none' | 'summary' | 'hex' = 'none'
   // Controls high-level status spam.
-  private statusLogging: 'none' | 'changes' | 'all' = 'changes'
+  private statusLogging: 'none' | 'changes' | 'all' = 'none'
   // Caps giant hex dumps in logs.
   private maxHexBytes = 96
-  private logLevel: 'none' | 'info' | 'debug' = 'info'
+  private logLevel: 'none' | 'info' | 'debug' = 'none'
   private lastStatusLogKey: string | null = null
   private lastStatusLogAt = 0
   // Matches reference: resolveNextNotificationPromise pattern
@@ -429,9 +429,9 @@ export class AnkerBleService {
     this.callbacks = callbacks
     this.profile = profile
     this.trafficLogging = options.trafficLogging ?? 'none'
-    this.statusLogging = options.statusLogging ?? 'changes'
+    this.statusLogging = options.statusLogging ?? 'none'
     this.maxHexBytes = options.maxHexBytes ?? 96
-    this.logLevel = options.logLevel ?? 'info'
+    this.logLevel = options.logLevel ?? 'none'
   }
 
   private formatHex(data: Uint8Array): string {

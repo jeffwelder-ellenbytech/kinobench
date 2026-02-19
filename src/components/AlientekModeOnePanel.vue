@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useAlientekModeOne } from '../composables/useAlientekModeOne'
 
-const { connected, status, refreshStatus, setLoad, setCurrent, setBasicSetpoint, setMode, startPolling, stopPolling, lastPolledAt, disconnect } = useAlientekModeOne()
+const { connected, status, refreshStatus, setLoad, setLock, setCurrent, setBasicSetpoint, setMode, startPolling, stopPolling, lastPolledAt, disconnect } = useAlientekModeOne()
 
 type MainMode = 'Basic' | 'Battery' | 'Power' | 'Advanced'
 type BasicSubMode = 'cc' | 'cv' | 'cr' | 'cp'
@@ -10,6 +10,7 @@ type BasicSubMode = 'cc' | 'cv' | 'cr' | 'cp'
 const autoRefresh = ref(true)
 const pollInterval = ref(1000)
 const loadChanging = ref(false)
+const cpLockChanging = ref(false)
 const currentChanging = ref(false)
 const modeChanging = ref(false)
 const editingSetpoint = ref(false)
@@ -48,7 +49,10 @@ const modeLabel = computed(() => {
 const profileLabel = computed(() => activeMainMode.value)
 const isBasicMode = computed(() => activeMainMode.value === 'Basic')
 const lastPolledLabel = computed(() => (lastPolledAt.value ? lastPolledAt.value.toLocaleTimeString() : 'Never'))
-const loadIsOn = computed(() => status.value.run !== 0)
+const loadIsOn = computed(() => (status.value.run & 0x02) !== 0)
+const cpLocked = computed(() => (status.value.run & 0x04) !== 0)
+const cpLockIcon = computed(() => (cpLocked.value ? 'mdi-lock' : 'mdi-lock-open-variant-outline'))
+const cpLockText = computed(() => (cpLocked.value ? 'Locked' : 'Unlocked'))
 const currentInputValid = computed(() => Number.isFinite(setCurrentInput.value) && setCurrentInput.value >= 0)
 const basicApplyDisabled = computed(() => {
   if (!connected.value || !isBasicMode.value || currentChanging.value) return true
@@ -154,6 +158,16 @@ async function toggleLoad() {
     await setLoad(!loadIsOn.value)
   } finally {
     loadChanging.value = false
+  }
+}
+
+async function toggleCpLock() {
+  if (!connected.value || !isBasicMode.value || basicSubMode.value !== 'cp' || cpLockChanging.value) return
+  cpLockChanging.value = true
+  try {
+    await setLock(!cpLocked.value)
+  } finally {
+    cpLockChanging.value = false
   }
 }
 
@@ -267,14 +281,16 @@ async function applyBasicParameter() {
       <div>
         <div class="measurement-display" :class="{ 'opacity-50': !connected }">
         <div class="topbar">
-          <div class="status-left">{{ status.run ? 'ON' : 'OFF' }}</div>
+          <div class="status-left">{{ loadIsOn ? 'ON' : 'OFF' }}</div>
           <div class="status-fan">
             <v-icon v-if="status.fan" icon="mdi-fan" size="22" />
             <span v-else>-</span>
             <v-icon icon="mdi-bluetooth" size="24" class="ml-1" />
           </div>
           <div class="status-profile">{{ profileLabel }}</div>
-          <div class="status-lock">🔓</div>
+          <div class="status-lock">
+            <v-icon :icon="cpLockIcon" size="20" />
+          </div>
           <div class="status-mode">{{ modeLabel }}</div>
         </div>
 
@@ -327,20 +343,32 @@ async function applyBasicParameter() {
           </div>
 
           <div class="text-subtitle-2 mb-2">Basic Sub Modes</div>
-          <v-btn-toggle
-            :model-value="basicSubMode"
-            @update:model-value="onBasicSubModeRequested"
-            mandatory
-            rounded="pill"
-            density="compact"
-            class="mb-3 radial-group"
-            :disabled="!connected || !isBasicMode || modeChanging"
-          >
-            <v-btn value="cc">CC</v-btn>
-            <v-btn value="cv">CV</v-btn>
-            <v-btn value="cr">CR</v-btn>
-            <v-btn value="cp">CP</v-btn>
-          </v-btn-toggle>
+          <div class="d-flex align-center mb-3">
+            <v-btn-toggle
+              :model-value="basicSubMode"
+              @update:model-value="onBasicSubModeRequested"
+              mandatory
+              rounded="pill"
+              density="compact"
+              class="radial-group"
+              :disabled="!connected || !isBasicMode || modeChanging"
+            >
+              <v-btn value="cc">CC</v-btn>
+              <v-btn value="cv">CV</v-btn>
+              <v-btn value="cr">CR</v-btn>
+              <v-btn value="cp">CP</v-btn>
+            </v-btn-toggle>
+            <v-btn
+              size="x-small"
+              variant="text"
+              class="ml-1"
+              :icon="cpLockIcon"
+              :title="`CP ${cpLockText}`"
+              :disabled="!connected || !isBasicMode || basicSubMode !== 'cp' || modeChanging || cpLockChanging"
+              :loading="cpLockChanging"
+              @click="toggleCpLock"
+            />
+          </div>
 
           <div class="text-subtitle-2 mb-2">
             <template v-if="basicSubMode === 'cc'">Set Current (A)</template>

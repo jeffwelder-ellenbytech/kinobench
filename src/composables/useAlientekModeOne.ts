@@ -102,6 +102,19 @@ async function setLoad(enabled: boolean) {
   }
 }
 
+async function setLock(locked: boolean) {
+  if (!service) return
+  error.value = null
+  try {
+    await service.setLock(locked)
+    await service.requestStatus()
+    lastPolledAt.value = new Date()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+    throw err
+  }
+}
+
 async function setCurrent(currentA: number) {
   if (!service) return
   error.value = null
@@ -178,6 +191,7 @@ export function useAlientekModeOne() {
     disconnect,
     refreshStatus,
     setLoad,
+    setLock,
     setCurrent,
     setBasicSetpoint,
     setMode,
