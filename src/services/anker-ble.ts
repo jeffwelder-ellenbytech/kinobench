@@ -74,6 +74,7 @@ const COMMAND_FLAG_ACK = 0x08
 const COMMAND_ACK_MASK_16 = 0x0800
 
 const GROUP_HANDSHAKE = 0x01
+const GROUP_ACTION = 0x0f
 const GROUP_STATUS = 0x11
 const CMD_HANDSHAKE_1 = 0x0001
 const CMD_HANDSHAKE_2 = 0x0003
@@ -252,11 +253,17 @@ function parseA2687PortData(value: Uint8Array): AnkerPortData {
   // [4..5]=milliamps? (LE) (empirically: raw/1000 == amps)
   // [6..7]=unknown/unused (often present; may be power or checksum-like)
   if (value.length < 8) return { mode: 'Off', voltage: 0, current: 0, power: 0 }
-  const enabledFlag = value[1] ?? 0
-  const mode: 'Off' | 'Output' = enabledFlag === 0 ? 'Off' : 'Output'
   const millivolts = parseU16LE(value, 2)
   const currentRaw = parseU16LE(value, 4)
-  if (mode === 'Off') {
+  const enabledFlag = value[1] ?? 0
+
+  // Some firmwares appear to keep the "enabled flag" at 1 even when a port is
+  // effectively disabled, but report 0V/0A. Treat that as Off so UI + port-switch
+  // post-check can succeed.
+  const isEffectivelyOff = enabledFlag === 0 || (millivolts === 0 && currentRaw === 0)
+  const mode: 'Off' | 'Output' = isEffectivelyOff ? 'Off' : 'Output'
+
+  if (isEffectivelyOff) {
     // If the port is disabled, treat telemetry as not-present to avoid false positives
     // when no load is connected (some firmwares still report an "Output" voltage).
     return { mode: 'Off', voltage: 0, current: 0, power: 0 }
@@ -1421,98 +1428,73 @@ export class AnkerBleService {
       throw new Error(`Session key is not active. Current crypto state: ${this.cryptoState}`)
     }
 
-    // APK surface shows action_set_dc_port_switch + switchIndex/switchOn.
-    //
-    // A2687 telemetry mapping in this codebase is:
-    // A5 -> C1, A6 -> C2, A7 -> C3 (represented as usbA in the UI).
-    //
-    // Empirical port-switch indices observed during debugging:
-    // - index=3 val=0: reported success (C1/C2 unclear at the time)
-    // - index=2 val=0: reported success
-    // We'll try the tight mapping first, then fall back to older guesses + brute force.
-    const tightIndexByPort: Record<'usbC1' | 'usbC2' | 'usbA', number> = {
-      usbC1: 3,
-      usbC2: 2,
-      usbA: 1,
+    // RN bundle DevicePort enum: C1=0, C2=1, A=2, Pin=3, C3=4, C4=5
+    // RN bundle TURN_ON_OFF enum: OFF=0, ON=1
+    // Action: action_set_dc_port_switch with switchIndex / switchOn
+    const switchIndexByPort: Record<'usbC1' | 'usbC2' | 'usbA', number> = {
+      usbC1: 0,
+      usbC2: 1,
+      // This UI uses `usbA` to represent the charger's third USB-C port.
+      usbA: 4,
     }
 
-    // We know 0x0207 responds with TLVs: A1=0x31, A2=index, A3=value.
-    // The response simply echoes our requested index/value, so we need to empirically
-    // determine which index and which value actually flips the port state on-device.
-    const desiredEnabled = enabled
+    const switchIndex = switchIndexByPort[port]
+    const switchOn = enabled ? 1 : 0
     const before = this.lastPowerStatus[port]
     this.info(
-      `Sending charger port switch request: cmd=0x${CMD_CHARGER_PORT_SWITCH.toString(16)} port=${port} before=${before.mode}/${before.voltage}V/${before.current}A/${before.power}W`,
+      `Port switch: cmd=0x${CMD_CHARGER_PORT_SWITCH.toString(16)} port=${port} index=${switchIndex} val=${switchOn} before=${before.mode}/${before.voltage}V/${before.current}A/${before.power}W`,
     )
 
-    // From captures: command 0x0207 responds with TLVs like:
-    //   A1=0x31, A2=<switchIndex>, A3=<switchOn>
-    // So the TLV *shape* is known. Remaining ambiguity is which numeric index
-    // corresponds to which physical port.
-    const legacyIndexByPort: Record<'usbC1' | 'usbC2' | 'usbA', number> = {
-      // Older guesses used earlier in this repo.
-      usbC1: 5,
-      usbC2: 6,
-      usbA: 7,
+    // A2687 port switching (official app / btsnoop):
+    // cmd=0x0207 (encrypted) in group=0x0f and uses a 2-block AES-CBC payload.
+    //
+    // Request TLVs (action_set_dc_port_switch), using the observed uint16 wrapper format:
+    // - A1 = 0x31 (constant)
+    // - A2 = [0x02, switchIndex, 0x00]  (uint16 LE)
+    // - A3 = [0x02, switchOn,   0x00]   (uint16 LE; OFF=0, ON=1)
+    // - A4 = [0x01, 0x00]               (uint8; observed present in app traffic)
+    const tlvArray = [
+      { type: 0xa1, value: new Uint8Array([0x31]) },
+      { type: 0xa2, value: new Uint8Array([0x02, switchIndex, 0x00]) },
+      { type: 0xa3, value: new Uint8Array([0x02, switchOn, 0x00]) },
+      { type: 0xa4, value: new Uint8Array([0x01, 0x00]) },
+    ]
+    const tlvData = buildTlvBuffer(tlvArray)
+    const cipherText = await this.encrypt(tlvData)
+    const payload = this.buildEncryptedPayload(GROUP_ACTION, CMD_CHARGER_PORT_SWITCH, cipherText)
+    const framedPacketForLog = framePacket(payload)
+    this.info(`Port switch TX (${framedPacketForLog.byteLength} bytes)`)
+    this.debug(`Port switch TX hex: ${this.formatHex(framedPacketForLog)}`)
+
+    try {
+      const response = await this.sendAndWaitForResponse(payload)
+      this.info(`Port switch RX (${response.byteLength} bytes)`)
+      this.debug(`Port switch RX hex: ${this.formatHex(response)}`)
+    } catch (err) {
+      this.info(`Port switch send/wait error: ${String(err)}`)
     }
 
-    const candidateIndices = Array.from(
-      new Set<number>([tightIndexByPort[port], legacyIndexByPort[port], 0, 1, 2, 3, 4, 5, 6, 7]),
-    )
+    // Poll status with retries. OFF can take longer for firmware to update the
+    // enabled flag in telemetry, so give it more attempts.
+    const maxAttempts = enabled ? 3 : 5
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      await this.requestStatus()
+      await new Promise((resolve) => setTimeout(resolve, 400))
 
-    // Values are still ambiguous in the wild. Based on "val=0 worked" report,
-    // try 0 as OFF first and 1 as ON first, with 2 as fallback.
-    const candidateValues = desiredEnabled ? [1, 2] : [0, 1, 2]
-
-    const isPortOff = (pd: AnkerPortData): boolean => pd.mode === 'Off'
-    const isPortOn = (pd: AnkerPortData): boolean => pd.mode === 'Output'
-
-    for (const idx of candidateIndices) {
-      for (const val of candidateValues) {
-        this.logTraffic(
-          `Port switch attempt: A1=0x31 A2=index(${idx}) A3=val(${val}) target=${desiredEnabled ? 'ON' : 'OFF'}`,
-        )
-
-        try {
-          const response = await this.sendEncryptedAndWait(GROUP_STATUS, CMD_CHARGER_PORT_SWITCH, [
-            { type: 0xa1, value: new Uint8Array([0x31]) },
-            { type: 0xa2, value: new Uint8Array([idx]) },
-            { type: 0xa3, value: new Uint8Array([val]) },
-          ])
-          this.logTraffic(
-            `Port switch response len=${response.byteLength}`,
-            `Port switch response payload (${response.byteLength} bytes): ${this.formatHex(response)}`,
-          )
-        } catch (err) {
-          this.info(`Port switch send/wait error (index=${idx} val=${val}): ${String(err)}`)
-        }
-
-        // Give the device time to apply, then poll twice.
-        await new Promise((resolve) => setTimeout(resolve, 800))
-        await this.requestStatus()
-        await new Promise((resolve) => setTimeout(resolve, 500))
-        await this.requestStatus()
-        await new Promise((resolve) => setTimeout(resolve, 300))
-
-        const now = this.lastPowerStatus[port]
-        const success = desiredEnabled ? isPortOn(now) : isPortOff(now)
-        this.logTraffic(
-          `Port switch post-check (port=${port} index=${idx} val=${val}): now=${now.mode}/${now.voltage}V/${now.current}A/${now.power}W success=${success}`,
-        )
-        if (success) {
-          this.info(`Port switch success: port=${port} index=${idx} val=${val} now=${now.mode}/${now.power}W`)
-          return
-        }
-
-        // Rate limit.
-        await new Promise((resolve) => setTimeout(resolve, 400))
+      const now = this.lastPowerStatus[port]
+      const success = enabled ? now.mode === 'Output' : now.mode === 'Off'
+      this.logTraffic(
+        `Port switch poll ${attempt}/${maxAttempts}: ${now.mode}/${now.voltage}V/${now.current}A/${now.power}W success=${success}`,
+      )
+      if (success) {
+        this.info(`Port switch success: port=${port} index=${switchIndex} val=${switchOn} now=${now.mode}/${now.power}W`)
+        return
       }
     }
 
     throw new Error(
-      `Port switch command sent but state did not change for ${port} (tried indices: ${candidateIndices.join(
-        ',',
-      )})`,
+      `Port switch command sent but state did not change for ${port} (index=${switchIndex} val=${switchOn})`,
     )
   }
 }

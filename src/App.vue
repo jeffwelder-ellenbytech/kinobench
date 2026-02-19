@@ -8,8 +8,10 @@ import AnkerConnectionPanel from './components/AnkerConnectionPanel.vue'
 import AnkerPowerPanel from './components/AnkerPowerPanel.vue'
 import AnkerChargerConnectionPanel from './components/AnkerChargerConnectionPanel.vue'
 import AnkerChargerPowerPanel from './components/AnkerChargerPowerPanel.vue'
+import AlientekConnectionPanel from './components/AlientekConnectionPanel.vue'
+import AlientekModeOnePanel from './components/AlientekModeOnePanel.vue'
 
-const activeTab = ref('anker-charger')
+const activeTab = ref('alientek')
 </script>
 
 <template>
@@ -27,6 +29,7 @@ const activeTab = ref('anker-charger')
           <v-tab value="buspirate" prepend-icon="mdi-usb">Bus Pirate</v-tab>
           <v-tab value="anker" prepend-icon="mdi-battery">Anker Powerbank</v-tab>
           <v-tab value="anker-charger" prepend-icon="mdi-flash">Anker Charger</v-tab>
+          <v-tab value="alientek" prepend-icon="mdi-gauge">Alientek EL15</v-tab>
         </v-tabs>
 
         <v-tabs-window v-model="activeTab">
@@ -61,6 +64,17 @@ const activeTab = ref('anker-charger')
               </v-col>
               <v-col cols="12" md="7" lg="8">
                 <AnkerChargerPowerPanel />
+              </v-col>
+            </v-row>
+          </v-tabs-window-item>
+
+          <v-tabs-window-item value="alientek" eager>
+            <v-row>
+              <v-col cols="12" md="5" lg="4">
+                <AlientekConnectionPanel />
+              </v-col>
+              <v-col cols="12" md="7" lg="8">
+                <AlientekModeOnePanel />
               </v-col>
             </v-row>
           </v-tabs-window-item>
